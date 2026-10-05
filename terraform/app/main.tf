@@ -78,7 +78,7 @@ resource "aws_lambda_function" "battlesnake" {
   architectures = ["x86_64"]
 
   timeout     = 10
-  memory_size = 256
+  memory_size = 1024
 
   environment {
     variables = {

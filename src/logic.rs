@@ -26,7 +26,7 @@ pub fn info() -> Value {
 
     json!({
         "apiversion": "1",
-        "author": "",          // TODO: coloque aqui o SEU usuário do Battlesnake
+        "author": "Thiagogit46",
         "color": "#8B0000",    // TODO: escolha a cor da sua cobra
         "head": "tiger-king",  // TODO: escolha a cabeça
         "tail": "hook",        // TODO: escolha a cauda
