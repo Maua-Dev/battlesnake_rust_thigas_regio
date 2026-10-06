@@ -24,7 +24,7 @@ pub fn info() -> Value {
     json!({
         "apiversion": "1",
         "author": "Thiagogit46",
-        "color": "#8B0000",    // TODO: escolha a cor da sua cobra
+        "color": "#0ABAB5",    // azul Tiffany, escolha do Thiago
         "head": "tiger-king",  // TODO: escolha a cabeça
         "tail": "hook",        // TODO: escolha a cauda
         "version": "2026.10.05"
