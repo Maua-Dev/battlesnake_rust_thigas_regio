@@ -1,36 +1,88 @@
 // ============================================================================
-// ||  BLOCO: CONSTANTES DE AJUSTE
-// ||  O QUE FAZ: todos os "pesos" da decisao num lugar so.
-// ||  POR QUE:   para ajustar o jeito da cobra sem cacar numeros no codigo.
+// ||  BLOCO: PESOS DA DECISAO
+// ||  O QUE FAZ: todos os numeros que definem o "jeito" da cobra, juntos.
+// ||  POR QUE:   para ajustar a cobra sem cacar numeros no codigo, e para
+// ||             comparar versoes no self-play (a de ontem contra a de hoje).
 // ============================================================================
 
-/// Abaixo desta vida a cobra passa a procurar comida.
-const HUNGRY_HEALTH: i32 = 50;
-/// Abaixo desta vida comer vale mais do que espaco (mas nunca mais que seguranca).
-const CRITICAL_HEALTH: i32 = 25;
-/// Queremos ser pelo menos esta quantidade maior que a maior adversaria.
-const WANTED_LENGTH_LEAD: i32 = 2;
+/// Os pesos de uma versao da cobra.
+#[derive(Debug, Clone, Copy)]
+pub struct Settings {
+    /// Etiqueta que vai no `shout`, para saber qual versao jogou.
+    pub tag: &'static str,
+    /// Abaixo desta vida a cobra procura comida.
+    pub hungry_health: i32,
+    /// Abaixo desta vida comer vale mais que espaco (nunca mais que seguranca).
+    pub critical_health: i32,
+    /// Queremos ser pelo menos esta quantidade maior que a maior adversaria.
+    pub wanted_length_lead: i32,
+    /// Espaco "confortavel" = comprimento * multiplier + extra.
+    pub comfort_multiplier: i32,
+    pub comfort_extra: i32,
+    /// Quanto vale cada passo mais perto da comida (com fome / vida critica).
+    pub food_weight: i64,
+    pub food_weight_critical: i64,
+    /// Bonus por mirar a casa onde uma cobra MENOR pode colocar a cabeca.
+    pub kill_bonus: i64,
+    /// Desempate: cada passo mais perto do centro.
+    pub center_weight: i64,
+    /// Flood fill cauteloso: as casas vizinhas das cabecas adversarias
+    /// contam como ocupadas (a cabeca delas tambem anda).
+    pub cautious_flood_fill: bool,
+    /// Territorio (Voronoi): cada casa que alcancamos antes das adversarias.
+    pub territory_weight: i64,
+    /// Caca: quando somos a maior, cada passo mais perto da cabeca adversaria.
+    /// Multiplicado pela urgencia, que cresce ate o turno 99.
+    pub hunt_weight: i64,
+    /// Bonus por deixar uma adversaria presa num espaco menor que ela.
+    pub trap_enemy_bonus: i64,
+}
 
-/// Espaco "confortavel" = comprimento * MULTIPLIER + EXTRA. Acima disso,
-/// mais espaco nao muda a nota (quem decide e a comida ou o centro).
-const COMFORT_MULTIPLIER: i32 = 2;
-const COMFORT_EXTRA: i32 = 4;
+/// A versao que joga agora.
+pub const SETTINGS: Settings = Settings {
+    tag: "v0606",
+    hungry_health: 50,
+    critical_health: 25,
+    wanted_length_lead: 3,
+    comfort_multiplier: 2,
+    comfort_extra: 4,
+    food_weight: 300,
+    food_weight_critical: 1_000,
+    kill_bonus: 300,
+    center_weight: 1,
+    cautious_flood_fill: true,
+    territory_weight: 10,
+    hunt_weight: 20,
+    trap_enemy_bonus: 50_000,
+};
 
-/// Notas de cada camada. Cada camada vale mais que tudo das camadas de baixo.
+/// A versao que jogou na arena em 05/10, guardada para comparar no self-play.
+#[cfg(test)]
+pub const SETTINGS_V0510: Settings = Settings {
+    tag: "v0510",
+    hungry_health: 50,
+    critical_health: 25,
+    wanted_length_lead: 2,
+    comfort_multiplier: 2,
+    comfort_extra: 4,
+    food_weight: 3,
+    food_weight_critical: 1_000,
+    kill_bonus: 60,
+    center_weight: 1,
+    cautious_flood_fill: false,
+    territory_weight: 0,
+    hunt_weight: 0,
+    trap_enemy_bonus: 0,
+};
+
+/// Notas das camadas de seguranca. Cada camada vale mais que tudo abaixo dela.
 const SCORE_NOT_TRAPPED: i64 = 1_000_000;
 const SCORE_NO_HEAD_RISK: i64 = 100_000;
 const SCORE_PER_SPACE_CELL: i64 = 100;
 /// Comida: a nota cresce quanto mais perto, ate este horizonte de passos.
 const FOOD_HORIZON: i64 = 30;
-const FOOD_WEIGHT: i64 = 3;
-const FOOD_WEIGHT_CRITICAL: i64 = 1_000;
-/// Bonus por mirar a casa onde uma cobra MENOR pode colocar a cabeca.
-const KILL_BONUS: i64 = 60;
-/// Desempate final: cada passo mais perto do centro vale isto.
-const CENTER_WEIGHT: i64 = 1;
-
-/// Etiqueta curta no `shout`, para confirmar nos replays qual versao jogou.
-const VERSION_TAG: &str = "v0510";
+/// A urgencia da caca sobe 1 ponto a cada tantos turnos (1 no inicio, 4 no turno 99).
+const TURNS_PER_URGENCY_STEP: i32 = 33;
 
 use crate::board::{Direction, Grid, ALL_DIRECTIONS};
 use crate::models::{Coord, GameState};
@@ -66,6 +118,12 @@ pub struct MoveInfo {
     pub eats: bool,
     /// Passos ate a comida mais proxima (preferindo as que chegamos primeiro).
     pub food_distance: Option<u32>,
+    /// Casas que alcancamos antes das adversarias, menos as que elas alcancam antes.
+    pub territory: i32,
+    /// Quantas adversarias ficam presas (espaco menor que o corpo) depois desta jogada.
+    pub enemies_trapped: i32,
+    /// Somos a maior: passos ate a cabeca adversaria mais proxima.
+    pub hunt_distance: Option<i32>,
     pub score: i64,
 }
 
@@ -75,15 +133,28 @@ pub struct Decision {
     pub shout: String,
 }
 
+/// Uma adversaria, resumida: onde esta a cabeca e qual o tamanho.
+struct Enemy {
+    head: Coord,
+    length: i32,
+}
+
 // ============================================================================
 // ||  BLOCO: ESCOLHA DA JOGADA
 // ||  O QUE FAZ: analisa as 4 direcoes e escolhe a de maior nota.
-// ||  POR QUE:   e a "rede de seguranca": nunca escolhe uma jogada que mata
-// ||             agora se existir outra, e foge de becos e de cobras maiores.
+// ||  POR QUE:   nunca escolhe uma jogada que mata agora se existir outra,
+// ||             foge de becos e de cobras maiores, come quando precisa e,
+// ||             sendo a maior, cerca e caca a adversaria.
 // ============================================================================
 
+/// A jogada da versao atual.
 pub fn choose_move(state: &GameState) -> Decision {
-    let infos = analyze_moves(state);
+    choose_move_with(state, &SETTINGS)
+}
+
+/// A jogada com os pesos de uma versao qualquer (o self-play usa isto).
+pub fn choose_move_with(state: &GameState, settings: &Settings) -> Decision {
+    let infos = analyze_moves_with(state, settings);
 
     let mut best: Option<&MoveInfo> = None;
     for info in &infos {
@@ -102,18 +173,24 @@ pub fn choose_move(state: &GameState) -> Decision {
     match best {
         Some(info) => Decision {
             direction: info.direction,
-            shout: describe(info),
+            shout: describe(info, settings),
         },
         // >>> Nenhuma direcao legal: qualquer jogada morre. Respondemos algo valido.
         None => Decision {
             direction: emergency_move(state),
-            shout: format!("{} sem saida", VERSION_TAG),
+            shout: format!("{} sem saida", settings.tag),
         },
     }
 }
 
-/// Analisa as 4 direcoes. Devolve uma lista vazia se o tabuleiro for invalido.
+/// Analisa as 4 direcoes com os pesos da versao atual.
+#[cfg(test)]
 pub fn analyze_moves(state: &GameState) -> Vec<MoveInfo> {
+    analyze_moves_with(state, &SETTINGS)
+}
+
+/// Analisa as 4 direcoes. Devolve uma lista vazia se o tabuleiro for invalido.
+pub fn analyze_moves_with(state: &GameState, settings: &Settings) -> Vec<MoveInfo> {
     let mut infos = Vec::new();
     let grid = match Grid::from_state(state) {
         Some(grid) => grid,
@@ -125,21 +202,38 @@ pub fn analyze_moves(state: &GameState) -> Vec<MoveInfo> {
     let my_length = me.body.len() as i32;
 
     // Separa as adversarias: as maiores ou iguais sao perigo; as menores, alvo.
+    let mut enemies: Vec<Enemy> = Vec::new();
     let mut big_heads: Vec<Coord> = Vec::new();
     let mut small_heads: Vec<Coord> = Vec::new();
+    let mut all_heads: Vec<Coord> = Vec::new();
     let mut longest_enemy = 0;
     for snake in &state.board.snakes {
         if snake.id == me.id {
             continue;
         }
         let length = snake.body.len() as i32;
-        if length > longest_enemy {
-            longest_enemy = length;
-        }
+        longest_enemy = longest_enemy.max(length);
         if length >= my_length {
             big_heads.push(snake.head);
         } else {
             small_heads.push(snake.head);
+        }
+        all_heads.push(snake.head);
+        enemies.push(Enemy { head: snake.head, length });
+    }
+
+    // >>> Grade cautelosa: as casas onde cada cabeca adversaria PODE entrar no
+    // >>> proximo turno contam como ocupadas pelo tempo que o corpo dela levaria
+    // >>> para sair de la.
+    let mut cautious = grid.clone();
+    if settings.cautious_flood_fill {
+        for enemy in &enemies {
+            for direction in ALL_DIRECTIONS {
+                let cell = direction.step(enemy.head);
+                if grid.can_enter(cell, 1, 0) {
+                    cautious.occupy_until(cell, enemy.length as u32 + 1);
+                }
+            }
         }
     }
 
@@ -148,8 +242,10 @@ pub fn analyze_moves(state: &GameState) -> Vec<MoveInfo> {
     let enemy_distance = distances_from(&grid, &big_heads, 0, 0);
 
     let wants_food =
-        me.health < HUNGRY_HEALTH || my_length < longest_enemy + WANTED_LENGTH_LEAD;
-    let critical = me.health < CRITICAL_HEALTH;
+        me.health < settings.hungry_health || my_length < longest_enemy + settings.wanted_length_lead;
+    let critical = me.health < settings.critical_health;
+    let i_am_biggest = !enemies.is_empty() && my_length > longest_enemy;
+    let urgency = 1 + (state.turn.max(0) / TURNS_PER_URGENCY_STEP) as i64;
 
     for direction in ALL_DIRECTIONS {
         let target = direction.step(my_head);
@@ -163,6 +259,9 @@ pub fn analyze_moves(state: &GameState) -> Vec<MoveInfo> {
             kill_chance: is_next_to_any(target, &small_heads),
             eats: state.board.food.contains(&target),
             food_distance: None,
+            territory: 0,
+            enemies_trapped: 0,
+            hunt_distance: None,
             score: 0,
         };
 
@@ -170,13 +269,39 @@ pub fn analyze_moves(state: &GameState) -> Vec<MoveInfo> {
             // >>> Se esta jogada come, a nossa cauda fica parada 1 turno:
             // >>> todas as casas do nosso corpo demoram 1 turno a mais para liberar.
             let my_delay = if info.eats { 1 } else { 0 };
-            let my_distance = distances_from(&grid, &[target], 1, my_delay);
-
-            info.space = my_distance.iter().filter(|d| **d != UNREACHABLE).count() as i32;
             let length_after = my_length + if info.eats { 1 } else { 0 };
+            let my_distance = distances_from(&cautious, &[target], 1, my_delay);
+
+            info.space = count_reachable(&my_distance);
             info.trapped = info.space < length_after;
             info.food_distance = nearest_food(&grid, state, &my_distance, &enemy_distance);
-            info.score = score_move(&info, &grid, my_length, wants_food, critical);
+
+            if !enemies.is_empty() && (settings.territory_weight != 0 || settings.trap_enemy_bonus != 0) {
+                // "E se a nossa cabeca estiver aqui?": a casa vira corpo nosso.
+                let mut after = grid.clone();
+                after.occupy_until(target, length_after as u32 + 1);
+
+                let their_distance = distances_from(&after, &all_heads, 0, 0);
+                info.territory = territory(&my_distance, &their_distance);
+
+                for enemy in &enemies {
+                    let reach = distances_from(&after, &[enemy.head], 0, 0);
+                    // >>> -1 porque a contagem inclui a casa da propria cabeca dela.
+                    if count_reachable(&reach) - 1 < enemy.length {
+                        info.enemies_trapped += 1;
+                    }
+                }
+            }
+
+            if i_am_biggest {
+                let mut nearest = i32::MAX;
+                for enemy in &enemies {
+                    nearest = nearest.min(manhattan(target, enemy.head));
+                }
+                info.hunt_distance = Some(nearest);
+            }
+
+            info.score = score_move(&info, &grid, my_length, wants_food, critical, urgency, settings);
         }
 
         infos.push(info);
@@ -187,7 +312,15 @@ pub fn analyze_moves(state: &GameState) -> Vec<MoveInfo> {
 
 /// A nota de uma jogada legal, em camadas: cada camada vale mais que
 /// tudo o que vem depois dela.
-fn score_move(info: &MoveInfo, grid: &Grid, my_length: i32, wants_food: bool, critical: bool) -> i64 {
+fn score_move(
+    info: &MoveInfo,
+    grid: &Grid,
+    my_length: i32,
+    wants_food: bool,
+    critical: bool,
+    urgency: i64,
+    settings: &Settings,
+) -> i64 {
     let mut score = 0;
 
     // Camada 1: nao entrar em beco.
@@ -198,24 +331,31 @@ fn score_move(info: &MoveInfo, grid: &Grid, my_length: i32, wants_food: bool, cr
     if !info.head_risk {
         score += SCORE_NO_HEAD_RISK;
     }
-    // Camada 3: espaco, ate o limite do confortavel.
-    let comfortable = my_length * COMFORT_MULTIPLIER + COMFORT_EXTRA;
+    // Camada 3: deixar adversarias presas (vitoria quase certa, sem arriscar a nossa).
+    score += info.enemies_trapped as i64 * settings.trap_enemy_bonus;
+
+    // Camada 4: espaco, ate o limite do confortavel.
+    let comfortable = my_length * settings.comfort_multiplier + settings.comfort_extra;
     score += info.space.min(comfortable) as i64 * SCORE_PER_SPACE_CELL;
 
-    // Camada 4: comida, se quisermos comer. Com vida critica, pesa bem mais.
+    // Camada 5: comida, territorio e caca disputam entre si.
     if wants_food || critical {
         if let Some(distance) = info.food_distance {
             let closeness = (FOOD_HORIZON - distance as i64).max(0);
-            let weight = if critical { FOOD_WEIGHT_CRITICAL } else { FOOD_WEIGHT };
+            let weight = if critical { settings.food_weight_critical } else { settings.food_weight };
             score += closeness * weight;
         }
+    }
+    score += info.territory as i64 * settings.territory_weight;
+    if let Some(distance) = info.hunt_distance {
+        score -= distance as i64 * settings.hunt_weight * urgency;
     }
 
     // Desempates: atacar cobra menor e ficar perto do centro.
     if info.kill_chance && !info.head_risk {
-        score += KILL_BONUS;
+        score += settings.kill_bonus;
     }
-    score -= distance_to_center(grid, info.target) * CENTER_WEIGHT;
+    score -= distance_to_center(grid, info.target) * settings.center_weight;
 
     score
 }
@@ -223,8 +363,8 @@ fn score_move(info: &MoveInfo, grid: &Grid, my_length: i32, wants_food: bool, cr
 // ============================================================================
 // ||  BLOCO: BUSCA EM LARGURA (BFS) QUE SABE QUE AS CAUDAS ANDAM
 // ||  O QUE FAZ: calcula em quantos turnos chegamos a cada casa.
-// ||  POR QUE:   com isso medimos o espaco (flood fill) e a distancia ate
-// ||             a comida, numa passada so.
+// ||  POR QUE:   com isso medimos o espaco (flood fill), a distancia ate a
+// ||             comida e o territorio de cada cobra.
 // ============================================================================
 
 /// Distancia, em turnos a partir de agora, de cada casa ate a origem mais
@@ -268,6 +408,25 @@ fn distances_from(grid: &Grid, origins: &[Coord], start_turn: u32, my_delay: u32
     distance
 }
 
+/// Quantas casas a BFS alcancou.
+fn count_reachable(distance: &[u32]) -> i32 {
+    distance.iter().filter(|d| **d != UNREACHABLE).count() as i32
+}
+
+/// Territorio (Voronoi): casas onde chegamos antes, menos casas onde elas
+/// chegam antes. Empate nao conta para ninguem.
+fn territory(mine: &[u32], theirs: &[u32]) -> i32 {
+    let mut result = 0;
+    for (m, t) in mine.iter().zip(theirs.iter()) {
+        if m < t {
+            result += 1;
+        } else if t < m {
+            result -= 1;
+        }
+    }
+    result
+}
+
 /// A comida mais proxima que alcancamos ANTES das cobras maiores ou iguais.
 /// Se nenhuma for "nossa", devolve a mais proxima de todas.
 fn nearest_food(grid: &Grid, state: &GameState, mine: &[u32], enemy: &[u32]) -> Option<u32> {
@@ -302,34 +461,32 @@ fn nearest_food(grid: &Grid, state: &GameState, mine: &[u32], enemy: &[u32]) -> 
 
 /// `true` se a casa `target` e vizinha de alguma das cabecas da lista.
 fn is_next_to_any(target: Coord, heads: &[Coord]) -> bool {
-    for head in heads {
-        let dx = (head.x - target.x).abs();
-        let dy = (head.y - target.y).abs();
-        if dx + dy == 1 {
-            return true;
-        }
-    }
-    false
+    heads.iter().any(|head| manhattan(*head, target) == 1)
+}
+
+/// Passos entre duas casas, sem contar obstaculos.
+fn manhattan(a: Coord, b: Coord) -> i32 {
+    (a.x - b.x).abs() + (a.y - b.y).abs()
 }
 
 /// Passos (sem contar obstaculos) de uma casa ate o centro do tabuleiro.
 fn distance_to_center(grid: &Grid, c: Coord) -> i64 {
-    let center_x = (grid.width - 1) / 2;
-    let center_y = (grid.height - 1) / 2;
-    ((c.x - center_x).abs() + (c.y - center_y).abs()) as i64
+    let center = Coord { x: (grid.width - 1) / 2, y: (grid.height - 1) / 2 };
+    manhattan(c, center) as i64
 }
 
-/// Texto curto para o `shout`: versao, direcao, espaco, comida e alertas.
-fn describe(info: &MoveInfo) -> String {
+/// Texto curto para o `shout`: versao, direcao, espaco, territorio, comida e alertas.
+fn describe(info: &MoveInfo, settings: &Settings) -> String {
     let food = match info.food_distance {
         Some(distance) => distance.to_string(),
         None => "-".to_string(),
     };
     let mut text = format!(
-        "{} {} esp{} com{}",
-        VERSION_TAG,
+        "{} {} esp{} ter{} com{}",
+        settings.tag,
         info.direction.as_str(),
         info.space,
+        info.territory,
         food
     );
     if info.trapped {
@@ -337,6 +494,12 @@ fn describe(info: &MoveInfo) -> String {
     }
     if info.head_risk {
         text.push_str(" risco");
+    }
+    if info.enemies_trapped > 0 {
+        text.push_str(" cerco");
+    }
+    if info.hunt_distance.is_some() {
+        text.push_str(" caca");
     }
     text
 }
@@ -595,5 +758,74 @@ mod tests {
         let enemy = snake("ela", &[(8, 5), (8, 4), (8, 3), (8, 2)], 100);
         let s = state(me, vec![enemy], &[(5, 5), (2, 9)]);
         assert_eq!(chosen(&s), Direction::Up);
+    }
+
+    #[test]
+    fn nao_entra_no_corredor_da_partida_contra_o_ian() {
+        // Tabuleiro REAL do turno 66 da partida c6dd4921 (05/10), contra Ian Augusto.
+        // A v0510 desceu para (2,7) e ficou presa no canto por 2 turnos.
+        // A saida boa era a direita: a cauda do Ian (4,8) e a nossa (5,7)
+        // liberam caminho para o tabuleiro aberto.
+        //
+        // y=10  . . b b . b
+        // y= 9  . . b b b b
+        // y= 8  . . H . e b
+        // y= 7  . . . e e t
+        // y= 6  . e e e . .
+        // y= 5  . E . . . .
+        // y= 4  . F . . . . . F
+        //       0 1 2 3 4 5 6 7
+        let me = snake(
+            "eu",
+            &[(2, 8), (2, 9), (2, 10), (3, 10), (3, 9), (4, 9), (4, 10), (5, 10), (5, 9), (5, 8), (5, 7)],
+            98,
+        );
+        let ian = snake("ian", &[(1, 5), (1, 6), (2, 6), (3, 6), (3, 7), (4, 7), (4, 8)], 74);
+        let mut s = state(me, vec![ian], &[(7, 4), (1, 4), (8, 0), (8, 5)]);
+        s.turn = 66;
+
+        // A versao antiga achava que descer era seguro...
+        let old = analyze_moves_with(&s, &SETTINGS_V0510);
+        let old_down = old.iter().find(|i| i.direction == Direction::Down).unwrap();
+        assert!(!old_down.trapped);
+
+        // ...a nova percebe o beco e vai para a direita.
+        assert!(info_for(&s, Direction::Down).trapped);
+        assert_eq!(chosen(&s), Direction::Right);
+    }
+
+    #[test]
+    fn prende_a_adversaria_contra_a_parede() {
+        // A adversaria (tamanho 5) anda para a esquerda no corredor entre a
+        // parede de baixo e o nosso corpo. A unica saida do corredor e (0,1).
+        // Indo para a esquerda, a nossa cabeca fecha a saida: ela fica com
+        // 3 casas livres, menos que o tamanho dela.
+        //
+        // y=2  . . . . . . . .
+        // y=1  . H b b b b b t
+        // y=0  . . . E e e e e
+        //      0 1 2 3 4 5 6 7
+        let me = snake("eu", &[(1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1)], 100);
+        let enemy = snake("ela", &[(3, 0), (4, 0), (5, 0), (6, 0), (7, 0)], 100);
+        let s = state(me, vec![enemy], &[]);
+        let left = info_for(&s, Direction::Left);
+        assert_eq!(left.enemies_trapped, 1, "{:?}", left);
+        assert!(!left.trapped);
+        // Descer para (1,0) tambem fecha o corredor (ainda mais perto dela).
+        // Qualquer uma das duas serve; subir deixaria a saida aberta.
+        let choice = chosen(&s);
+        assert!(info_for(&s, choice).enemies_trapped >= 1, "escolheu {:?}", choice);
+        assert_ne!(choice, Direction::Up);
+    }
+
+    #[test]
+    fn caca_a_adversaria_menor() {
+        // Somos bem maiores (7 contra 3) e estamos de vida cheia: sem fome,
+        // a cobra vai na direcao da adversaria em vez de ficar passeando.
+        let me = snake("eu", &[(5, 5), (5, 4), (5, 3), (5, 2), (5, 1), (4, 1), (3, 1)], 100);
+        let enemy = snake("ela", &[(9, 5), (9, 6), (9, 7)], 100);
+        let mut s = state(me, vec![enemy], &[]);
+        s.turn = 80;
+        assert_eq!(chosen(&s), Direction::Right);
     }
 }

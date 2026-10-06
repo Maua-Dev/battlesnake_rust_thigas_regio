@@ -12,7 +12,13 @@
 mod board;
 mod logic;
 mod models;
+// >>> Por enquanto o simulador so e usado pelo self-play (teste). Quando a
+// >>> busca entrar, ele passa a fazer parte da cobra de verdade.
+#[cfg(test)]
+mod rules;
 mod safety;
+#[cfg(test)]
+mod selfplay;
 
 use lambda_http::{run, service_fn, Body, Error, Request, RequestPayloadExt, Response};
 use models::GameState;

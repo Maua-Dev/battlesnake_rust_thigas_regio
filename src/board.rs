@@ -62,6 +62,8 @@ impl Direction {
 
 /// A grade do tabuleiro, guardada como um vetor linear:
 /// a casa (x, y) fica na posicao `y * width + x`.
+/// `Clone` permite fazer uma copia da grade para marcar "e se" sem estragar a original.
+#[derive(Clone)]
 pub struct Grid {
     pub width: i32,
     pub height: i32,
@@ -125,6 +127,17 @@ impl Grid {
                 if is_me {
                     self.mine[index] = true;
                 }
+            }
+        }
+    }
+
+    /// Marca uma casa como ocupada ate daqui a `turns` turnos (se ja estiver
+    /// ocupada por mais tempo, fica como esta). Usado para os "e se":
+    /// "e se a nossa cabeca for para ca?", "e se a adversaria vier para ca?".
+    pub fn occupy_until(&mut self, c: Coord, turns: u32) {
+        if let Some(index) = self.index_of(c) {
+            if turns > self.free_at[index] {
+                self.free_at[index] = turns;
             }
         }
     }
