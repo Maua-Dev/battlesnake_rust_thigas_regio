@@ -9,8 +9,10 @@
 //!   POST /move    -> escolha a jogada deste turno
 //!   POST /end     -> a partida acabou
 
+mod board;
 mod logic;
 mod models;
+mod safety;
 
 use lambda_http::{run, service_fn, Body, Error, Request, RequestPayloadExt, Response};
 use models::GameState;

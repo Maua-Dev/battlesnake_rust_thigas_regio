@@ -5,17 +5,14 @@
 //  |    |   \ / __ \|  |  |  | |  |_\  ___/ \___ \|   |  \/ __ \|    <\  ___/
 //  |________/(______/__|  |__| |____/\_____>______>___|__(______/__|__\_____>
 //
-// ESTE É O ARQUIVO QUE VOCÊ VAI EDITAR. Todo o resto do projeto existe
-// só para levar o estado do jogo até as quatro funções abaixo.
-//
-// Para começar, já deixamos pronta a lógica que impede a sua cobra de andar
-// para trás (ela morreria na hora). Os TODOs marcam os próximos passos.
-// Documentação: https://docs.battlesnake.com
+// As quatro funcoes que a arena chama. A inteligencia da cobra fica nos
+// outros arquivos; aqui so organizamos a conversa com a arena.
+// Documentacao: https://docs.battlesnake.com
 
 use crate::models::GameState;
-use rand::seq::IndexedRandom;
+use crate::safety;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use tracing::info;
 
 /// GET / — chamado quando você cadastra a cobra no site e a cada partida.
@@ -30,12 +27,11 @@ pub fn info() -> Value {
         "color": "#8B0000",    // TODO: escolha a cor da sua cobra
         "head": "tiger-king",  // TODO: escolha a cabeça
         "tail": "hook",        // TODO: escolha a cauda
-        "version": "1.0.0"
+        "version": "2026.10.05"
     })
 }
 
 /// POST /start — chamado uma vez, quando a partida começa.
-/// Bom lugar para preparar qualquer estado inicial.
 pub fn start(state: &GameState) {
     info!("JOGO COMEÇOU (partida {})", state.game.id);
 }
@@ -45,110 +41,37 @@ pub fn end(state: &GameState) {
     info!("FIM DE JOGO após {} turnos", state.turn);
 }
 
-/// POST /move — chamado a cada turno. Aqui mora a inteligência da sua cobra.
-/// Precisa devolver "up", "down", "left" ou "right".
-/// Exemplo do JSON recebido: https://docs.battlesnake.com/api/example-move
+// ============================================================================
+// ||  BLOCO: JOGADA DO TURNO (POST /move)
+// ||  O QUE FAZ: pede a decisao para a rede de seguranca e responde a arena.
+// ||  POR QUE:   se qualquer coisa der errado la dentro, ainda respondemos
+// ||             uma direcao valida em vez de perder a jogada.
+// ============================================================================
+
 pub fn get_move(state: &GameState) -> Value {
-    let mut is_move_safe: HashMap<&str, bool> = HashMap::from([
-        ("up", true),
-        ("down", true),
-        ("left", true),
-        ("right", true),
-    ]);
+    // >>> `catch_unwind` segura um panico (erro grave) que aconteca dentro da
+    // >>> decisao. Sem ele, um panico derrubaria a resposta inteira.
+    let result = catch_unwind(AssertUnwindSafe(|| safety::choose_move(state)));
 
-    // --- Impedir que a cobra ande para trás (já implementado) ---
-    // O pescoço é a parte do corpo logo atrás da cabeça. Voltar por cima dele
-    // é morte certa, então marcamos aquela direção como insegura.
-    let my_head = &state.you.body[0];
-
-    // Acesso seguro ao pescoço — a cobra pode ter apenas 1 segmento no início.
-    if let Some(my_neck) = state.you.body.get(1) {
-        if my_neck.x < my_head.x {
-            // pescoço à esquerda da cabeça -> não vá para a esquerda
-            is_move_safe.insert("left", false);
-        } else if my_neck.x > my_head.x {
-            // pescoço à direita da cabeça -> não vá para a direita
-            is_move_safe.insert("right", false);
-        } else if my_neck.y < my_head.y {
-            // pescoço abaixo da cabeça -> não desça
-            is_move_safe.insert("down", false);
-        } else if my_neck.y > my_head.y {
-            // pescoço acima da cabeça -> não suba
-            is_move_safe.insert("up", false);
+    match result {
+        Ok(decision) => {
+            info!("MOVE {}: {}", state.turn, decision.shout);
+            json!({ "move": decision.direction.as_str(), "shout": decision.shout })
+        }
+        Err(_) => {
+            let direction = safety::emergency_move(state);
+            info!("MOVE {}: panico! emergencia -> {}", state.turn, direction.as_str());
+            json!({ "move": direction.as_str(), "shout": "emergencia" })
         }
     }
-
-    // 2. Impedir que a cobra saia do tabuleiro (paredes)
-    let board_width = state.board.width;
-    let board_height = state.board.height;
-
-    if my_head.x + 1 >= board_width {
-        is_move_safe.insert("right", false);
-    }
-    if my_head.x - 1 < 0 {
-        is_move_safe.insert("left", false);
-    }
-    if my_head.y + 1 >= board_height {
-        is_move_safe.insert("up", false);
-    }
-    if my_head.y - 1 < 0 {
-        is_move_safe.insert("down", false);
-    }
-
-    // 3. Impedir que a cobra bata no próprio corpo
-    let my_body = &state.you.body;
-    for segment in my_body {
-        if segment.x == my_head.x + 1 && segment.y == my_head.y {
-            is_move_safe.insert("right", false);
-        }
-        if segment.x == my_head.x - 1 && segment.y == my_head.y {
-            is_move_safe.insert("left", false);
-        }
-        if segment.x == my_head.x && segment.y == my_head.y + 1 {
-            is_move_safe.insert("up", false);
-        }
-        if segment.x == my_head.x && segment.y == my_head.y - 1 {
-            is_move_safe.insert("down", false);
-        }
-    }
-
-    // TODO: Passo 3 — impedir que a cobra bata nas adversárias
-    // let opponents = &state.board.snakes;
-
-    // Sobrou alguma direção segura?
-    let safe_moves: Vec<&str> = is_move_safe
-        .into_iter()
-        .filter(|(_, is_safe)| *is_safe)
-        .map(|(direction, _)| direction)
-        .collect();
-
-    if safe_moves.is_empty() {
-        // Emergência: todas as direções são perigosas.
-        // Escolhemos uma ao acaso entre as 4 — melhor do que uma direção fixa.
-        let all_moves = ["up", "down", "left", "right"];
-        let fallback = all_moves
-            .choose(&mut rand::rng())
-            .expect("array não está vazio");
-        info!("MOVE {}: sem saída! emergência -> {}", state.turn, fallback);
-        return json!({ "move": fallback });
-    }
-
-    // Escolhe uma direção segura ao acaso.
-    let chosen = safe_moves
-        .choose(&mut rand::rng())
-        .expect("safe_moves não está vazio");
-
-    // TODO: Passo 4 — ir atrás da comida em vez de sortear, para não morrer de fome
-    // let food = &state.board.food;
-
-    info!("MOVE {}: {}", state.turn, chosen);
-    json!({ "move": chosen })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::{Battlesnake, Board, Coord, Game};
+    use rand::Rng;
+    use std::collections::HashMap;
 
     /// Monta um estado de jogo mínimo para os testes, com a cobra deitada
     /// na horizontal: cabeça em `head` e pescoço em `neck`.
@@ -294,5 +217,93 @@ mod tests {
             ["up", "down", "left", "right"].contains(&direction.as_str()),
             "fallback retornou direção inválida: {direction}"
         );
+    }
+
+    // ------------------------------------------------------------------------
+    // Robustez: centenas de tabuleiros aleatórios, inclusive absurdos
+    // (corpos fora do tabuleiro, vida negativa, tabuleiro 1x1). A resposta
+    // tem que ser sempre uma das 4 direções, sem pânico.
+    // ------------------------------------------------------------------------
+
+    fn random_snake(rng: &mut rand::rngs::ThreadRng, id: &str, width: i32, height: i32) -> Battlesnake {
+        let length = rng.random_range(0..=20);
+        let mut body = Vec::new();
+        let mut cell = Coord {
+            x: rng.random_range(-1..=width),
+            y: rng.random_range(-1..=height),
+        };
+        for _ in 0..length {
+            body.push(cell);
+            match rng.random_range(0..5) {
+                0 => cell.x += 1,
+                1 => cell.x -= 1,
+                2 => cell.y += 1,
+                3 => cell.y -= 1,
+                _ => {} // repete a casa, como uma cauda empilhada
+            }
+        }
+        let head = match body.first() {
+            Some(first) => *first,
+            None => Coord { x: 0, y: 0 },
+        };
+        Battlesnake {
+            id: id.to_string(),
+            name: id.to_string(),
+            health: rng.random_range(-5..=105),
+            length: body.len() as i32,
+            body,
+            head,
+            latency: None,
+            shout: None,
+        }
+    }
+
+    #[test]
+    fn robustez_tabuleiros_aleatorios_sempre_respondem_direcao_valida() {
+        let mut rng = rand::rng();
+        for round in 0..500 {
+            let width = rng.random_range(0..=19);
+            let height = rng.random_range(0..=19);
+            let snake_count = rng.random_range(1..=8);
+            let mut snakes = Vec::new();
+            for i in 0..snake_count {
+                snakes.push(random_snake(&mut rng, &format!("cobra-{i}"), width, height));
+            }
+            let you = snakes[0].clone();
+            // >>> Às vezes a nossa cobra NÃO vem na lista, para testar esse caso também.
+            if round % 7 == 0 {
+                snakes.remove(0);
+            }
+            let mut food = Vec::new();
+            for _ in 0..rng.random_range(0..=10) {
+                food.push(Coord {
+                    x: rng.random_range(-1..=width),
+                    y: rng.random_range(-1..=height),
+                });
+            }
+
+            let state = GameState {
+                game: Game {
+                    id: "aleatoria".to_string(),
+                    ruleset: HashMap::new(),
+                    map: None,
+                    timeout: 500,
+                },
+                turn: rng.random_range(0..=300),
+                board: Board { height, width, food, hazards: vec![], snakes },
+                you,
+            };
+
+            // >>> Chamamos a decisão DIRETO (sem o catch_unwind do get_move):
+            // >>> assim um pânico aparece como falha do teste em vez de ser escondido.
+            let decision = crate::safety::choose_move(&state);
+            assert!(["up", "down", "left", "right"].contains(&decision.direction.as_str()));
+
+            let direction = chosen_move(&state);
+            assert!(
+                ["up", "down", "left", "right"].contains(&direction.as_str()),
+                "rodada {round}: direção inválida {direction}"
+            );
+        }
     }
 }
