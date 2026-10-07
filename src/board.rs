@@ -6,6 +6,10 @@
 // ============================================================================
 
 use crate::models::{Coord, GameState};
+use std::collections::VecDeque;
+
+/// Distancia de uma casa que nao da para alcancar.
+pub const UNREACHABLE: u32 = u32::MAX;
 
 /// Maior tabuleiro que aceitamos (em numero de casas). O padrao e 11x11 = 121.
 /// Acima disso a requisicao e estranha e usamos so a jogada de emergencia.
@@ -171,4 +175,78 @@ impl Grid {
         }
         ready_at <= turns
     }
+}
+
+// ============================================================================
+// ||  BLOCO: BUSCA EM LARGURA (BFS) QUE SABE QUE AS CAUDAS ANDAM
+// ||  O QUE FAZ: calcula em quantos turnos uma cabeca chega a cada casa.
+// ||  POR QUE:   com isso medimos espaco (flood fill), distancia ate a comida
+// ||             e o territorio de cada cobra. Usada pela rede de seguranca
+// ||             e pela avaliacao da busca.
+// ============================================================================
+
+/// Distancia, em turnos a partir de agora, de cada casa ate a origem mais
+/// proxima. As origens comecam em `start_turn`. Casas sem caminho ficam
+/// com `UNREACHABLE`.
+///
+/// A BFS anda em "ondas": primeiro todas as casas a 1 passo, depois a 2...
+/// Uma casa so entra na onda `t` se ja estiver livre no turno `t`.
+pub fn distances_from(grid: &Grid, origins: &[Coord], start_turn: u32, my_delay: u32) -> Vec<u32> {
+    let mut distance = vec![UNREACHABLE; grid.cell_count()];
+    let mut queue: VecDeque<Coord> = VecDeque::new();
+
+    for origin in origins {
+        if let Some(index) = grid.index_of(*origin) {
+            distance[index] = start_turn;
+            queue.push_back(*origin);
+        }
+    }
+
+    while let Some(cell) = queue.pop_front() {
+        let here = match grid.index_of(cell) {
+            Some(index) => distance[index],
+            None => continue,
+        };
+        for direction in ALL_DIRECTIONS {
+            let next = direction.step(cell);
+            let next_index = match grid.index_of(next) {
+                Some(index) => index,
+                None => continue,
+            };
+            if distance[next_index] != UNREACHABLE {
+                continue;
+            }
+            if grid.can_enter(next, here + 1, my_delay) {
+                distance[next_index] = here + 1;
+                queue.push_back(next);
+            }
+        }
+    }
+
+    distance
+}
+
+/// Quantas casas a BFS alcancou.
+pub fn count_reachable(distance: &[u32]) -> i32 {
+    distance.iter().filter(|d| **d != UNREACHABLE).count() as i32
+}
+
+/// Territorio (Voronoi): casas onde chegamos antes, menos casas onde elas
+/// chegam antes. Em empate de distancia, a casa e de quem for maior:
+/// `tie_is_ours` diz se esse alguem somos nos.
+pub fn territory(mine: &[u32], theirs: &[u32], tie_is_ours: bool) -> i32 {
+    let mut result = 0;
+    for (m, t) in mine.iter().zip(theirs.iter()) {
+        if m < t || (m == t && *m != UNREACHABLE && tie_is_ours) {
+            result += 1;
+        } else if t < m {
+            result -= 1;
+        }
+    }
+    result
+}
+
+/// Passos entre duas casas, sem contar obstaculos.
+pub fn manhattan(a: Coord, b: Coord) -> i32 {
+    (a.x - b.x).abs() + (a.y - b.y).abs()
 }

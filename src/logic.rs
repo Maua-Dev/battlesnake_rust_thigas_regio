@@ -9,11 +9,38 @@
 // outros arquivos; aqui so organizamos a conversa com a arena.
 // Documentacao: https://docs.battlesnake.com
 
+// ============================================================================
+// ||  BLOCO: CONTROLE DE TEMPO
+// ||  O QUE FAZ: define quanto tempo a busca pode pensar em cada jogada.
+// ||  POR QUE:   a arena espera no maximo 500 ms. Estourar o tempo faz a
+// ||             cobra repetir a jogada anterior, o que costuma matar.
+// ============================================================================
+
+/// Tempo normal de busca por jogada.
+#[cfg(not(test))]
+const SEARCH_BUDGET_MS: u64 = 250;
+// >>> Nos testes a busca pensa pouco, para a bateria de testes ser rapida.
+#[cfg(test)]
+const SEARCH_BUDGET_MS: u64 = 10;
+/// Nunca usar mais que (timeout da partida - esta margem): sobra para a rede.
+const RESPONSE_MARGIN_MS: u64 = 150;
+/// Primeira jogada de um processo novo (cold start): pensar menos.
+const COLD_START_BUDGET_MS: u64 = 100;
+/// Se a arena mediu uma latencia acima disto na jogada anterior, pensar metade.
+const SLOW_LATENCY_MS: u64 = 420;
+
+use crate::board::Direction;
+use crate::eval::WIN;
 use crate::models::GameState;
-use crate::safety;
+use crate::{safety, search};
 use serde_json::{json, Value};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use tracing::info;
+
+/// Fica `true` depois da primeira jogada atendida por este processo.
+static WARMED_UP: AtomicBool = AtomicBool::new(false);
 
 /// GET / — chamado quando você cadastra a cobra no site e a cada partida.
 /// Controla a aparência dela. Opções de cabeça, cauda e cor:
@@ -27,7 +54,7 @@ pub fn info() -> Value {
         "color": "#0ABAB5",    // azul Tiffany, escolha do Thiago
         "head": "tiger-king",  // TODO: escolha a cabeça
         "tail": "hook",        // TODO: escolha a cauda
-        "version": "2026.10.05"
+        "version": "2026.10.06"
     })
 }
 
@@ -43,27 +70,73 @@ pub fn end(state: &GameState) {
 
 // ============================================================================
 // ||  BLOCO: JOGADA DO TURNO (POST /move)
-// ||  O QUE FAZ: pede a decisao para a rede de seguranca e responde a arena.
-// ||  POR QUE:   se qualquer coisa der errado la dentro, ainda respondemos
-// ||             uma direcao valida em vez de perder a jogada.
+// ||  O QUE FAZ: 1) a rede de seguranca escolhe uma jogada provisoria;
+// ||             2) a busca pensa ate o prazo e, se completar pelo menos uma
+// ||                profundidade, a jogada dela vale.
+// ||  POR QUE:   sempre ha uma resposta pronta. Se a busca der panico ou
+// ||             nao terminar, fica a jogada da rede de seguranca.
 // ============================================================================
 
 pub fn get_move(state: &GameState) -> Value {
-    // >>> `catch_unwind` segura um panico (erro grave) que aconteca dentro da
-    // >>> decisao. Sem ele, um panico derrubaria a resposta inteira.
-    let result = catch_unwind(AssertUnwindSafe(|| safety::choose_move(state)));
+    let deadline = Instant::now() + search_budget(state);
+    let (direction, shout) = decide(state, deadline);
+    info!("MOVE {}: {}", state.turn, shout);
+    json!({ "move": direction.as_str(), "shout": shout })
+}
 
-    match result {
-        Ok(decision) => {
-            info!("MOVE {}: {}", state.turn, decision.shout);
-            json!({ "move": decision.direction.as_str(), "shout": decision.shout })
+/// A decisao completa (rede de seguranca + busca ate `deadline`).
+/// O self-play tambem usa esta funcao.
+pub fn decide(state: &GameState, deadline: Instant) -> (Direction, String) {
+    let started = Instant::now();
+
+    // >>> `catch_unwind` segura um panico (erro grave) que aconteca la dentro.
+    // >>> Sem ele, um panico derrubaria a resposta inteira.
+    let safe = match catch_unwind(AssertUnwindSafe(|| safety::choose_move(state))) {
+        Ok(decision) => decision,
+        Err(_) => return (safety::emergency_move(state), "emergencia".to_string()),
+    };
+
+    let searched = catch_unwind(AssertUnwindSafe(|| search::search(state, deadline, &safe.ranking)));
+    match searched {
+        Ok(Some(result)) => {
+            // >>> Nota enorme = a busca viu o fim da partida: vitoria ou derrota garantida.
+            let verdict = if result.score >= WIN / 2 {
+                " ganha"
+            } else if result.score <= -WIN / 2 {
+                " perde"
+            } else {
+                ""
+            };
+            let shout = format!(
+                "{} | busca {} prof{} nos{} {}ms{}",
+                safe.shout,
+                result.direction.as_str(),
+                result.depth,
+                result.nodes,
+                started.elapsed().as_millis(),
+                verdict
+            );
+            (result.direction, shout)
         }
-        Err(_) => {
-            let direction = safety::emergency_move(state);
-            info!("MOVE {}: panico! emergencia -> {}", state.turn, direction.as_str());
-            json!({ "move": direction.as_str(), "shout": "emergencia" })
+        _ => (safe.direction, safe.shout),
+    }
+}
+
+/// Quanto tempo a busca pode usar nesta jogada.
+fn search_budget(state: &GameState) -> Duration {
+    let timeout = state.game.timeout as u64;
+    let mut budget = SEARCH_BUDGET_MS.min(timeout.saturating_sub(RESPONSE_MARGIN_MS));
+    // >>> `swap` marca o processo como "aquecido" e devolve como estava antes.
+    if !WARMED_UP.swap(true, Ordering::Relaxed) {
+        budget = budget.min(COLD_START_BUDGET_MS);
+    }
+    let last_latency = state.you.latency.as_deref().and_then(|text| text.parse::<u64>().ok());
+    if let Some(latency) = last_latency {
+        if latency > SLOW_LATENCY_MS {
+            budget /= 2;
         }
     }
+    Duration::from_millis(budget)
 }
 
 #[cfg(test)]

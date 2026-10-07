@@ -84,12 +84,10 @@ const FOOD_HORIZON: i64 = 30;
 /// A urgencia da caca sobe 1 ponto a cada tantos turnos (1 no inicio, 4 no turno 99).
 const TURNS_PER_URGENCY_STEP: i32 = 33;
 
-use crate::board::{Direction, Grid, ALL_DIRECTIONS};
+use crate::board::{
+    count_reachable, distances_from, manhattan, territory, Direction, Grid, ALL_DIRECTIONS, UNREACHABLE,
+};
 use crate::models::{Coord, GameState};
-use std::collections::VecDeque;
-
-/// Distancia de uma casa que nao da para alcancar.
-const UNREACHABLE: u32 = u32::MAX;
 
 // ============================================================================
 // ||  BLOCO: ANALISE DE UMA JOGADA
@@ -131,6 +129,8 @@ pub struct MoveInfo {
 pub struct Decision {
     pub direction: Direction,
     pub shout: String,
+    /// As jogadas legais, da melhor para a pior nota (a busca comeca por elas).
+    pub ranking: Vec<Direction>,
 }
 
 /// Uma adversaria, resumida: onde esta a cabeca e qual o tamanho.
@@ -170,15 +170,21 @@ pub fn choose_move_with(state: &GameState, settings: &Settings) -> Decision {
         }
     }
 
+    let mut legal: Vec<&MoveInfo> = infos.iter().filter(|info| info.legal).collect();
+    legal.sort_by(|a, b| b.score.cmp(&a.score));
+    let ranking: Vec<Direction> = legal.iter().map(|info| info.direction).collect();
+
     match best {
         Some(info) => Decision {
             direction: info.direction,
             shout: describe(info, settings),
+            ranking,
         },
         // >>> Nenhuma direcao legal: qualquer jogada morre. Respondemos algo valido.
         None => Decision {
             direction: emergency_move(state),
             shout: format!("{} sem saida", settings.tag),
+            ranking,
         },
     }
 }
@@ -282,7 +288,7 @@ pub fn analyze_moves_with(state: &GameState, settings: &Settings) -> Vec<MoveInf
                 after.occupy_until(target, length_after as u32 + 1);
 
                 let their_distance = distances_from(&after, &all_heads, 0, 0);
-                info.territory = territory(&my_distance, &their_distance);
+                info.territory = territory(&my_distance, &their_distance, false);
 
                 for enemy in &enemies {
                     let reach = distances_from(&after, &[enemy.head], 0, 0);
@@ -360,73 +366,6 @@ fn score_move(
     score
 }
 
-// ============================================================================
-// ||  BLOCO: BUSCA EM LARGURA (BFS) QUE SABE QUE AS CAUDAS ANDAM
-// ||  O QUE FAZ: calcula em quantos turnos chegamos a cada casa.
-// ||  POR QUE:   com isso medimos o espaco (flood fill), a distancia ate a
-// ||             comida e o territorio de cada cobra.
-// ============================================================================
-
-/// Distancia, em turnos a partir de agora, de cada casa ate a origem mais
-/// proxima. As origens comecam em `start_turn`. Casas sem caminho ficam
-/// com `UNREACHABLE`.
-///
-/// A BFS anda em "ondas": primeiro todas as casas a 1 passo, depois a 2...
-/// Uma casa so entra na onda `t` se ja estiver livre no turno `t`.
-fn distances_from(grid: &Grid, origins: &[Coord], start_turn: u32, my_delay: u32) -> Vec<u32> {
-    let mut distance = vec![UNREACHABLE; grid.cell_count()];
-    let mut queue: VecDeque<Coord> = VecDeque::new();
-
-    for origin in origins {
-        if let Some(index) = grid.index_of(*origin) {
-            distance[index] = start_turn;
-            queue.push_back(*origin);
-        }
-    }
-
-    while let Some(cell) = queue.pop_front() {
-        let here = match grid.index_of(cell) {
-            Some(index) => distance[index],
-            None => continue,
-        };
-        for direction in ALL_DIRECTIONS {
-            let next = direction.step(cell);
-            let next_index = match grid.index_of(next) {
-                Some(index) => index,
-                None => continue,
-            };
-            if distance[next_index] != UNREACHABLE {
-                continue;
-            }
-            if grid.can_enter(next, here + 1, my_delay) {
-                distance[next_index] = here + 1;
-                queue.push_back(next);
-            }
-        }
-    }
-
-    distance
-}
-
-/// Quantas casas a BFS alcancou.
-fn count_reachable(distance: &[u32]) -> i32 {
-    distance.iter().filter(|d| **d != UNREACHABLE).count() as i32
-}
-
-/// Territorio (Voronoi): casas onde chegamos antes, menos casas onde elas
-/// chegam antes. Empate nao conta para ninguem.
-fn territory(mine: &[u32], theirs: &[u32]) -> i32 {
-    let mut result = 0;
-    for (m, t) in mine.iter().zip(theirs.iter()) {
-        if m < t {
-            result += 1;
-        } else if t < m {
-            result -= 1;
-        }
-    }
-    result
-}
-
 /// A comida mais proxima que alcancamos ANTES das cobras maiores ou iguais.
 /// Se nenhuma for "nossa", devolve a mais proxima de todas.
 fn nearest_food(grid: &Grid, state: &GameState, mine: &[u32], enemy: &[u32]) -> Option<u32> {
@@ -462,11 +401,6 @@ fn nearest_food(grid: &Grid, state: &GameState, mine: &[u32], enemy: &[u32]) -> 
 /// `true` se a casa `target` e vizinha de alguma das cabecas da lista.
 fn is_next_to_any(target: Coord, heads: &[Coord]) -> bool {
     heads.iter().any(|head| manhattan(*head, target) == 1)
-}
-
-/// Passos entre duas casas, sem contar obstaculos.
-fn manhattan(a: Coord, b: Coord) -> i32 {
-    (a.x - b.x).abs() + (a.y - b.y).abs()
 }
 
 /// Passos (sem contar obstaculos) de uma casa ate o centro do tabuleiro.

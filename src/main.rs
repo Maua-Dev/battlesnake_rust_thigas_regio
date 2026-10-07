@@ -10,13 +10,12 @@
 //!   POST /end     -> a partida acabou
 
 mod board;
+mod eval;
 mod logic;
 mod models;
-// >>> Por enquanto o simulador so e usado pelo self-play (teste). Quando a
-// >>> busca entrar, ele passa a fazer parte da cobra de verdade.
-#[cfg(test)]
 mod rules;
 mod safety;
+mod search;
 #[cfg(test)]
 mod selfplay;
 

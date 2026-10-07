@@ -14,7 +14,7 @@ use rand::rngs::StdRng;
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Regras de comida do modo standard: sempre pelo menos 1 comida, e 15% de
 /// chance de nascer mais uma a cada turno.
@@ -32,6 +32,8 @@ enum Player {
     Greedy,
     /// Gira atras da propria cauda e so sai para comer com vida baixa.
     Chicken,
+    /// A cobra completa (rede de seguranca + busca), pensando tantos ms por jogada.
+    Search(u64),
 }
 
 impl Player {
@@ -41,6 +43,7 @@ impl Player {
             Player::RandomSafe => "aleatoria".to_string(),
             Player::Greedy => "gulosa".to_string(),
             Player::Chicken => "chicken".to_string(),
+            Player::Search(ms) => format!("busca{ms}"),
         }
     }
 }
@@ -144,6 +147,9 @@ fn decide(player: &Player, view: &GameState, rng: &mut StdRng) -> Direction {
     if let Player::Ours(settings) = player {
         return safety::choose_move_with(view, settings).direction;
     }
+    if let Player::Search(ms) = player {
+        return crate::logic::decide(view, Instant::now() + Duration::from_millis(*ms)).0;
+    }
 
     // Os bots usam a nossa analise so para saber o que e legal e o que e beco.
     let infos = safety::analyze_moves_with(view, &SETTINGS_V0510);
@@ -186,7 +192,7 @@ fn decide(player: &Player, view: &GameState, rng: &mut StdRng) -> Direction {
             }
             best.direction
         }
-        Player::Ours(_) => Direction::Up,
+        Player::Ours(_) | Player::Search(_) => Direction::Up,
     }
 }
 
@@ -206,7 +212,7 @@ fn play_game(players: &[Player], rng: &mut StdRng) -> Outcome {
             view.you = snake.clone();
             let started = Instant::now();
             let direction = decide(&players[index], &view, rng);
-            if let Player::Ours(_) = players[index] {
+            if let Player::Ours(_) | Player::Search(_) = players[index] {
                 slowest_ms = slowest_ms.max(started.elapsed().as_secs_f64() * 1000.0);
             }
             moves.push(direction);
@@ -225,11 +231,39 @@ fn play_game(players: &[Player], rng: &mut StdRng) -> Outcome {
     Outcome { survivors, lengths, turns: state.turn, slowest_ms }
 }
 
+/// Quantas partidas rodam ao mesmo tempo (uma por "thread" do processador).
+const PARALLEL_GAMES: usize = 6;
+
+/// Joga `games` partidas, varias ao mesmo tempo. Cada partida tem a sua
+/// propria semente, entao o resultado nao depende da ordem das threads.
+fn play_many(players: &[Player], games: usize, seed: u64) -> Vec<Outcome> {
+    let mut outcomes = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for thread in 0..PARALLEL_GAMES {
+            let players = players.to_vec();
+            handles.push(scope.spawn(move || {
+                let mut mine = Vec::new();
+                let mut game = thread;
+                while game < games {
+                    let mut rng = StdRng::seed_from_u64(seed * 100_000 + game as u64);
+                    mine.push(play_game(&players, &mut rng));
+                    game += PARALLEL_GAMES;
+                }
+                mine
+            }));
+        }
+        for handle in handles {
+            outcomes.extend(handle.join().unwrap_or_default());
+        }
+    });
+    outcomes
+}
+
 /// Joga varias partidas e imprime, para cada jogador: vitorias por eliminacao,
 /// sobrevivencias ate o turno 99 (o "cara ou coroa" da arena) e mortes.
 /// Devolve a pontuacao do jogador 0: vitoria = 1, turno 99 vivo = 1/(vivos), morte = 0.
 fn run_match(label: &str, players: &[Player], games: usize, seed: u64) -> f64 {
-    let mut rng = StdRng::seed_from_u64(seed);
     let count = players.len();
     let mut sole_wins = vec![0; count];
     let mut cap_alive = vec![0; count];
@@ -239,8 +273,7 @@ fn run_match(label: &str, players: &[Player], games: usize, seed: u64) -> f64 {
     let mut total_turns = 0;
     let mut slowest: f64 = 0.0;
 
-    for _ in 0..games {
-        let outcome = play_game(players, &mut rng);
+    for outcome in play_many(players, games, seed) {
         total_turns += outcome.turns;
         slowest = slowest.max(outcome.slowest_ms);
         let alive = outcome.survivors.len();
@@ -319,15 +352,70 @@ fn selfplay_calibracao() {
 
 /// Igual a `run_match`, mas sem imprimir: so devolve a pontuacao do jogador 0.
 fn run_match_quiet(players: &[Player], games: usize, seed: u64) -> f64 {
-    let mut rng = StdRng::seed_from_u64(seed);
     let mut points = 0.0;
-    for _ in 0..games {
-        let outcome = play_game(players, &mut rng);
+    for outcome in play_many(players, games, seed) {
         if outcome.survivors.contains(&0) {
             points += 1.0 / outcome.survivors.len() as f64;
         }
     }
     points / games as f64
+}
+
+/// Mede quanto tempo a decisao completa leva, numa thread so, em tabuleiros
+/// de partidas reais do self-play. Mostra o pior caso e os mais lentos.
+#[test]
+#[ignore]
+fn tempo_da_busca() {
+    let budget = 50;
+    let players = [Player::Ours(SETTINGS), Player::Ours(SETTINGS), Player::Greedy, Player::Chicken];
+    let mut times: Vec<(f64, i32, usize)> = Vec::new();
+    for game in 0..6 {
+        let mut rng = StdRng::seed_from_u64(900 + game);
+        let count = if game % 2 == 0 { 2 } else { 4 };
+        let mut state = new_game(count, &mut rng);
+        while state.board.snakes.len() > 1 && state.turn < ARENA_LAST_TURN {
+            let mut moves = Vec::new();
+            for (i, snake) in state.board.snakes.iter().enumerate() {
+                let mut view = state.clone();
+                view.you = snake.clone();
+                if i == 0 {
+                    let started = Instant::now();
+                    crate::logic::decide(&view, started + Duration::from_millis(budget));
+                    times.push((started.elapsed().as_secs_f64() * 1000.0, state.turn, count));
+                }
+                let index: usize = snake.id.parse().unwrap_or(0);
+                moves.push(decide(&players[index], &view, &mut rng));
+            }
+            rules::apply_turn(&mut state, &moves);
+            spawn_food(&mut state, &mut rng);
+        }
+    }
+    times.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    println!("\n{} decisoes, orcamento {budget} ms. As 8 mais lentas (ms, turno, cobras):", times.len());
+    for (ms, turn, count) in times.iter().take(8) {
+        println!("   {ms:7.1} ms  turno {turn:3}  {count} cobras");
+    }
+}
+
+/// Versao curta do teste abaixo, para comparar ajustes de pesos da avaliacao.
+#[test]
+#[ignore]
+fn selfplay_busca_rapido() {
+    let search = Player::Search(50);
+    run_match("busca x v0606 (duelo)", &[search, Player::Ours(SETTINGS)], 72, 31);
+    run_match("busca x gulosa", &[search, Player::Greedy], 36, 32);
+}
+
+/// A cobra com busca contra as versoes sem busca e os bots.
+#[test]
+#[ignore]
+fn selfplay_busca() {
+    let search = Player::Search(50);
+    run_match("busca x v0606 (duelo)", &[search, Player::Ours(SETTINGS)], 120, 21);
+    run_match("busca x v0510 (duelo)", &[search, Player::Ours(SETTINGS_V0510)], 120, 22);
+    run_match("busca x chicken", &[search, Player::Chicken], 60, 23);
+    run_match("busca x gulosa", &[search, Player::Greedy], 60, 24);
+    run_match("4 cobras: busca, v0606, gulosa, chicken", &[search, Player::Ours(SETTINGS), Player::Greedy, Player::Chicken], 60, 25);
 }
 
 #[test]
