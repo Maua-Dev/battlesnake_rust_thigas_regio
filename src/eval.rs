@@ -47,7 +47,7 @@ pub struct EvalWeights {
 
 /// Os pesos que a cobra usa na arena.
 pub const EVAL: EvalWeights = EvalWeights {
-    tag: "aperto",
+    tag: "b0707",
     territory: 10,
     length: 2_000,
     food: 50,

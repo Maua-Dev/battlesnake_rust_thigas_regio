@@ -112,8 +112,9 @@ pub fn decide_with(state: &GameState, deadline: Instant, weights: &EvalWeights) 
                 ""
             };
             let shout = format!(
-                "{} | busca {} prof{} nos{} {}ms{}",
+                "{} | {} {} prof{} nos{} {}ms{}",
                 safe.shout,
+                weights.tag,
                 result.direction.as_str(),
                 result.depth,
                 result.nodes,
