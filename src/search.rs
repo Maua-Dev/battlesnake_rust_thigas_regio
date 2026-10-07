@@ -16,7 +16,7 @@ const MAX_MINIMIZERS: usize = 2;
 const INFINITY: i64 = i64::MAX / 4;
 
 use crate::board::{manhattan, Direction, ALL_DIRECTIONS};
-use crate::eval::{evaluate, terminal_value, WIN};
+use crate::eval::{evaluate, terminal_value, EvalWeights, WIN};
 use crate::models::{Coord, GameState};
 use crate::rules::{apply_turn, ARENA_LAST_TURN};
 use std::time::Instant;
@@ -35,6 +35,7 @@ pub struct SearchResult {
 /// Guarda o estado da busca enquanto ela roda.
 struct Searcher {
     me_id: String,
+    weights: EvalWeights,
     deadline: Instant,
     nodes: u64,
     out_of_time: bool,
@@ -49,7 +50,11 @@ struct Searcher {
 
 /// `root_order`: as nossas jogadas legais, da melhor para a pior segundo a
 /// rede de seguranca. A busca comeca por elas, nessa ordem.
-pub fn search(state: &GameState, deadline: Instant, root_order: &[Direction]) -> Option<SearchResult> {
+pub fn search(state: &GameState, deadline: Instant, root_order: &[Direction], weights: &EvalWeights) -> Option<SearchResult> {
+    // >>> A busca copia o tabuleiro milhares de vezes. Copiando so o essencial
+    // >>> (sem regras, nomes e textos), cada copia fica muito mais barata.
+    let lean = lean_copy(state);
+    let state = &lean;
     let me_id = state.you.id.as_str();
     let me_alive = state.board.snakes.iter().any(|s| s.id == me_id);
     // >>> Sem adversarias (partida solo) a busca nao tem o que decidir.
@@ -57,7 +62,7 @@ pub fn search(state: &GameState, deadline: Instant, root_order: &[Direction]) ->
         return None;
     }
 
-    let mut searcher = Searcher { me_id: me_id.to_string(), deadline, nodes: 0, out_of_time: false };
+    let mut searcher = Searcher { me_id: me_id.to_string(), weights: *weights, deadline, nodes: 0, out_of_time: false };
     let mut order: Vec<Direction> = root_order.to_vec();
     let mut best: Option<SearchResult> = None;
     // >>> Depois do turno 99 nao ha jogo: nao adianta olhar mais longe que isso.
@@ -120,7 +125,7 @@ impl Searcher {
             return value;
         }
         if depth <= 0 {
-            return evaluate(state, &self.me_id);
+            return evaluate(state, &self.me_id, &self.weights);
         }
         let me = match state.board.snakes.iter().position(|s| s.id == self.me_id) {
             Some(index) => index,
@@ -202,6 +207,29 @@ impl Searcher {
 // ||  O QUE FAZ: lista as jogadas que nao batem em parede nem em corpo, e
 // ||             escolhe quem joga contra nos e como as outras jogam.
 // ============================================================================
+
+/// Uma copia do tabuleiro so com o que a busca usa: corpos, vida, comida e
+/// turno. Os ids viram textos curtos ("0", "1"...), mais baratos de copiar.
+fn lean_copy(state: &GameState) -> GameState {
+    let mut lean = state.clone();
+    lean.game.ruleset.clear();
+    lean.game.map = None;
+    lean.game.id.clear();
+    lean.board.hazards.clear();
+    for (index, snake) in lean.board.snakes.iter_mut().enumerate() {
+        if snake.id == state.you.id {
+            lean.you.id = index.to_string();
+        }
+        snake.id = index.to_string();
+        snake.name.clear();
+        snake.latency = None;
+        snake.shout = None;
+    }
+    lean.you.name.clear();
+    lean.you.latency = None;
+    lean.you.shout = None;
+    lean
+}
 
 /// A casa esta livre para uma cabeca entrar no proximo turno?
 // >>> So o ULTIMO pedaco de cada corpo libera a casa (a cauda anda). Se a cauda
@@ -353,21 +381,26 @@ mod tests {
 
     #[test]
     fn nao_entra_no_corredor_de_cima_contra_tokuji_rust() {
-        // Partida 522f65c8 (duelo), turno 62. A v0510 foi para a direita pela
-        // linha de cima, atras da comida (9,9); a Tokuji_rust fechou a saida
-        // e nos batemos no corpo dela no turno 67.
+        // Partida 522f65c8 (duelo), turno 63. A v0510 seguiu para a direita pela
+        // linha de cima; dali em diante nao havia volta: a Tokuji_rust fechou a
+        // saida e nos batemos no corpo dela no turno 67. A saida certa era
+        // descer pela coluna x=5, que a cauda dela vai liberando.
+        //
+        // y=10  . . . . b H . . . . .
+        // y= 9  . . . . b . r r E . .
+        // y= 8  . . . b b . r . . . .
         let me = snake(
             "eu",
-            &[(4, 10), (4, 9), (4, 8), (3, 8), (3, 7), (3, 6), (3, 5), (2, 5), (2, 6), (2, 7)],
-            86,
+            &[(5, 10), (4, 10), (4, 9), (4, 8), (3, 8), (3, 7), (3, 6), (3, 5), (2, 5), (2, 6)],
+            85,
         );
         let rust = snake(
             "rust",
-            &[(7, 9), (6, 9), (6, 8), (6, 7), (6, 6), (6, 5), (6, 4), (5, 4), (4, 4), (4, 5)],
-            94,
+            &[(8, 9), (7, 9), (6, 9), (6, 8), (6, 7), (6, 6), (6, 5), (6, 4), (5, 4), (4, 4)],
+            93,
         );
-        let s = state(62, me, vec![rust], &[(9, 9), (7, 5)]);
-        assert_ne!(decide(&s), Direction::Right);
+        let s = state(63, me, vec![rust], &[(9, 9), (7, 5)]);
+        assert_eq!(decide(&s), Direction::Down);
     }
 
     #[test]
@@ -384,7 +417,7 @@ mod tests {
         let enemy = snake("ela", &[(3, 0), (4, 0), (5, 0), (6, 0), (7, 0)], 100);
         let s = state(20, me, vec![enemy], &[]);
         let ranking = crate::safety::choose_move(&s).ranking;
-        let result = search(&s, Instant::now() + Duration::from_millis(500), &ranking).unwrap();
+        let result = search(&s, Instant::now() + Duration::from_millis(500), &ranking, &crate::eval::EVAL).unwrap();
         assert!(result.score >= WIN / 2, "nota {} em profundidade {}", result.score, result.depth);
     }
 
@@ -399,5 +432,48 @@ mod tests {
         let started = Instant::now();
         crate::logic::decide(&s, started + Duration::from_millis(50));
         assert!(started.elapsed() < Duration::from_millis(80), "levou {:?}", started.elapsed());
+    }
+}
+
+#[cfg(test)]
+mod speed {
+    use super::*;
+    use crate::models::{Battlesnake, Board, Game};
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    /// Quantos tabuleiros a busca olha em 200 ms num duelo de meio de partida,
+    /// com o pacote de regras do jeito que a arena manda (rode com --release).
+    #[test]
+    #[ignore]
+    fn velocidade_da_busca() {
+        let body = |cells: &[(i32, i32)]| -> Vec<Coord> { cells.iter().map(|(x, y)| Coord { x: *x, y: *y }).collect() };
+        let snake = |id: &str, cells: &[(i32, i32)]| Battlesnake {
+            id: id.to_string(),
+            name: format!("cobra {id}"),
+            health: 80,
+            head: body(cells)[0],
+            length: cells.len() as i32,
+            body: body(cells),
+            latency: Some("123".to_string()),
+            shout: Some("uma frase qualquer de exemplo".to_string()),
+        };
+        let me = snake("6b6886f0-1234-4321-abcd-0123456789ab", &[(5, 5), (5, 4), (5, 3), (4, 3), (3, 3), (3, 4), (3, 5), (3, 6), (3, 7), (3, 8)]);
+        let enemy = snake("b85cd55e-1234-4321-abcd-0123456789ab", &[(8, 6), (8, 5), (8, 4), (9, 4), (9, 3), (9, 2), (8, 2), (7, 2)]);
+        let mut ruleset = HashMap::new();
+        ruleset.insert("name".to_string(), json!("standard"));
+        ruleset.insert("version".to_string(), json!("v1.2.3"));
+        ruleset.insert("settings".to_string(), json!({"foodSpawnChance": 15, "minimumFood": 1, "hazardDamagePerTurn": 14,
+            "royale": {"shrinkEveryNTurns": 25}, "squad": {"allowBodyCollisions": false, "sharedElimination": false}}));
+        let state = GameState {
+            game: Game { id: "7d1c2c1e-1234-4321-abcd-0123456789ab".to_string(), ruleset, map: Some("standard".to_string()), timeout: 500 },
+            turn: 50,
+            board: Board { width: 11, height: 11, food: body(&[(1, 1), (9, 9), (6, 8)]), hazards: vec![], snakes: vec![me.clone(), enemy] },
+            you: me,
+        };
+        let ranking = crate::safety::choose_move(&state).ranking;
+        let result = search(&state, Instant::now() + Duration::from_millis(200), &ranking, &crate::eval::EVAL).unwrap();
+        println!("\n200 ms: {} tabuleiros, profundidade {}", result.nodes, result.depth);
     }
 }

@@ -30,7 +30,7 @@ const COLD_START_BUDGET_MS: u64 = 60;
 const SLOW_LATENCY_MS: u64 = 420;
 
 use crate::board::Direction;
-use crate::eval::WIN;
+use crate::eval::{EvalWeights, EVAL, WIN};
 use crate::models::GameState;
 use crate::{safety, search};
 use serde_json::{json, Value};
@@ -85,8 +85,12 @@ pub fn get_move(state: &GameState) -> Value {
 }
 
 /// A decisao completa (rede de seguranca + busca ate `deadline`).
-/// O self-play tambem usa esta funcao.
 pub fn decide(state: &GameState, deadline: Instant) -> (Direction, String) {
+    decide_with(state, deadline, &EVAL)
+}
+
+/// A decisao com os pesos de avaliacao escolhidos (o self-play usa isto).
+pub fn decide_with(state: &GameState, deadline: Instant, weights: &EvalWeights) -> (Direction, String) {
     let started = Instant::now();
 
     // >>> `catch_unwind` segura um panico (erro grave) que aconteca la dentro.
@@ -96,7 +100,7 @@ pub fn decide(state: &GameState, deadline: Instant) -> (Direction, String) {
         Err(_) => return (safety::emergency_move(state), "emergencia".to_string()),
     };
 
-    let searched = catch_unwind(AssertUnwindSafe(|| search::search(state, deadline, &safe.ranking)));
+    let searched = catch_unwind(AssertUnwindSafe(|| search::search(state, deadline, &safe.ranking, weights)));
     match searched {
         Ok(Some(result)) => {
             // >>> Nota enorme = a busca viu o fim da partida: vitoria ou derrota garantida.

@@ -9,6 +9,7 @@
 use crate::board::Direction;
 use crate::models::{Battlesnake, Board, Coord, Game, GameState};
 use crate::rules::{self, ARENA_LAST_TURN};
+use crate::eval::{EvalWeights, EVAL};
 use crate::safety::{self, Settings, SETTINGS, SETTINGS_V0510};
 use rand::rngs::StdRng;
 use rand::seq::{IndexedRandom, SliceRandom};
@@ -33,7 +34,7 @@ enum Player {
     /// Gira atras da propria cauda e so sai para comer com vida baixa.
     Chicken,
     /// A cobra completa (rede de seguranca + busca), pensando tantos ms por jogada.
-    Search(u64),
+    Search(u64, EvalWeights),
 }
 
 impl Player {
@@ -43,7 +44,7 @@ impl Player {
             Player::RandomSafe => "aleatoria".to_string(),
             Player::Greedy => "gulosa".to_string(),
             Player::Chicken => "chicken".to_string(),
-            Player::Search(ms) => format!("busca{ms}"),
+            Player::Search(ms, weights) => format!("{}{ms}", weights.tag),
         }
     }
 }
@@ -147,8 +148,8 @@ fn decide(player: &Player, view: &GameState, rng: &mut StdRng) -> Direction {
     if let Player::Ours(settings) = player {
         return safety::choose_move_with(view, settings).direction;
     }
-    if let Player::Search(ms) = player {
-        return crate::logic::decide(view, Instant::now() + Duration::from_millis(*ms)).0;
+    if let Player::Search(ms, weights) = player {
+        return crate::logic::decide_with(view, Instant::now() + Duration::from_millis(*ms), weights).0;
     }
 
     // Os bots usam a nossa analise so para saber o que e legal e o que e beco.
@@ -192,7 +193,7 @@ fn decide(player: &Player, view: &GameState, rng: &mut StdRng) -> Direction {
             }
             best.direction
         }
-        Player::Ours(_) | Player::Search(_) => Direction::Up,
+        Player::Ours(_) | Player::Search(_, _) => Direction::Up,
     }
 }
 
@@ -212,7 +213,7 @@ fn play_game(players: &[Player], rng: &mut StdRng) -> Outcome {
             view.you = snake.clone();
             let started = Instant::now();
             let direction = decide(&players[index], &view, rng);
-            if let Player::Ours(_) | Player::Search(_) = players[index] {
+            if let Player::Ours(_) | Player::Search(_, _) = players[index] {
                 slowest_ms = slowest_ms.max(started.elapsed().as_secs_f64() * 1000.0);
             }
             moves.push(direction);
@@ -397,11 +398,26 @@ fn tempo_da_busca() {
     }
 }
 
+/// Calibracao da busca: varias combinacoes de pesos contra a v0606, que
+/// sobrevive bem (parecida com as Tokuji). O que importa: eliminar antes do turno 99.
+#[test]
+#[ignore]
+fn selfplay_calibracao_busca() {
+    let candidates = [
+        EvalWeights { tag: "base", ..EVAL },
+        EvalWeights { tag: "aperto5", squeeze: 5, ..EVAL },
+        EvalWeights { tag: "ap5ter30", squeeze: 5, territory: 30, ..EVAL },
+    ];
+    for weights in candidates {
+        run_match(weights.tag, &[Player::Search(50, weights), Player::Ours(SETTINGS)], 150, 51);
+    }
+}
+
 /// Versao curta do teste abaixo, para comparar ajustes de pesos da avaliacao.
 #[test]
 #[ignore]
 fn selfplay_busca_rapido() {
-    let search = Player::Search(50);
+    let search = Player::Search(50, EVAL);
     run_match("busca x v0606 (duelo)", &[search, Player::Ours(SETTINGS)], 72, 31);
     run_match("busca x gulosa", &[search, Player::Greedy], 36, 32);
 }
@@ -410,7 +426,7 @@ fn selfplay_busca_rapido() {
 #[test]
 #[ignore]
 fn selfplay_busca() {
-    let search = Player::Search(50);
+    let search = Player::Search(50, EVAL);
     run_match("busca x v0606 (duelo)", &[search, Player::Ours(SETTINGS)], 120, 21);
     run_match("busca x v0510 (duelo)", &[search, Player::Ours(SETTINGS_V0510)], 120, 22);
     run_match("busca x chicken", &[search, Player::Chicken], 60, 23);

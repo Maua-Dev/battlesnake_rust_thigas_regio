@@ -14,24 +14,47 @@ const TURN_VALUE: i64 = 1_000;
 
 /// Ficar num espaco menor que o proprio corpo (beco).
 const TRAPPED_PENALTY: i64 = 50_000_000;
-/// Cada adversaria presa num espaco menor que o corpo dela.
-const ENEMY_TRAPPED_BONUS: i64 = 5_000_000;
 /// A comida mais perto esta mais longe do que a vida que nos resta.
 const STARVING_PENALTY: i64 = 40_000_000;
-
-/// Cada casa de territorio (Voronoi).
-const TERRITORY_WEIGHT: i64 = 10;
-/// Cada unidade de tamanho a mais que a maior adversaria (ate MAX_USEFUL_LEAD).
-const LENGTH_WEIGHT: i64 = 2_000;
+/// Depois de tantas unidades a mais que a maior adversaria, crescer nao conta mais.
 const MAX_USEFUL_LEAD: i64 = 4;
-/// Com fome (ou sem a vantagem de tamanho desejada): cada passo ate a comida.
-const FOOD_WEIGHT: i64 = 50;
+/// Sem comida alcancavel, conta como se ela estivesse a tantos passos.
 const FOOD_HORIZON: i64 = 30;
 const HUNGRY_HEALTH: i32 = 50;
 const WANTED_LENGTH_LEAD: i32 = 3;
-/// Sendo a maior: cada passo ate a cabeca adversaria mais proxima, vezes a urgencia.
-const HUNT_WEIGHT: i64 = 20;
+/// A urgencia da caca sobe 1 ponto a cada tantos turnos (1 no inicio, 4 no turno 99).
 const TURNS_PER_URGENCY_STEP: i32 = 33;
+
+/// Os pesos que o self-play ajusta. `Copy` deixa passar a struct por valor.
+#[derive(Debug, Clone, Copy)]
+pub struct EvalWeights {
+    /// Etiqueta para os relatorios do self-play.
+    pub tag: &'static str,
+    /// Cada casa de territorio (Voronoi).
+    pub territory: i64,
+    /// Cada unidade de tamanho a mais que a maior adversaria (ate MAX_USEFUL_LEAD).
+    pub length: i64,
+    /// Com fome (ou sem a vantagem de tamanho desejada): cada passo ate a comida.
+    pub food: i64,
+    /// Sendo a maior: cada passo ate a cabeca adversaria mais proxima, vezes a urgencia.
+    pub hunt: i64,
+    /// Sendo a maior: cada casa em que a adversaria ainda consegue andar, vezes
+    /// a urgencia. E o "aperto": quanto menos espaco ela tiver, melhor.
+    pub squeeze: i64,
+    /// Cada adversaria presa num espaco menor que o corpo dela.
+    pub enemy_trapped: i64,
+}
+
+/// Os pesos que a cobra usa na arena.
+pub const EVAL: EvalWeights = EvalWeights {
+    tag: "aperto",
+    territory: 10,
+    length: 2_000,
+    food: 50,
+    hunt: 20,
+    squeeze: 0,
+    enemy_trapped: 5_000_000,
+};
 
 use crate::board::{count_reachable, distances_from, manhattan, territory, Grid, UNREACHABLE};
 use crate::models::GameState;
@@ -69,11 +92,11 @@ pub fn terminal_value(state: &GameState, me_id: &str) -> Option<i64> {
 
 // ============================================================================
 // ||  BLOCO: NOTA DE UM TABULEIRO EM ANDAMENTO
-// ||  O QUE FAZ: soma territorio, tamanho, comida, caca e becos (nossos e
-// ||             das adversarias), do ponto de vista da cobra `me_id`.
+// ||  O QUE FAZ: soma territorio, tamanho, comida, caca, aperto e becos
+// ||             (nossos e das adversarias), do ponto de vista da cobra `me_id`.
 // ============================================================================
 
-pub fn evaluate(state: &GameState, me_id: &str) -> i64 {
+pub fn evaluate(state: &GameState, me_id: &str, weights: &EvalWeights) -> i64 {
     if let Some(value) = terminal_value(state, me_id) {
         return value;
     }
@@ -98,6 +121,8 @@ pub fn evaluate(state: &GameState, me_id: &str) -> i64 {
 
     let mine = distances_from(&grid, &[me.head], 0, 0);
     let theirs = distances_from(&grid, &enemy_heads, 0, 0);
+    let lead = (my_length - longest_enemy) as i64;
+    let urgency = 1 + (state.turn.max(0) / TURNS_PER_URGENCY_STEP) as i64;
     let mut score: i64 = 0;
 
     // Becos: o nosso (muito ruim) e o das adversarias (muito bom).
@@ -105,22 +130,29 @@ pub fn evaluate(state: &GameState, me_id: &str) -> i64 {
     if count_reachable(&mine) - 1 < my_length {
         score -= TRAPPED_PENALTY;
     }
+    let mut enemy_space_total = 0;
     for snake in &state.board.snakes {
         if snake.id == me_id {
             continue;
         }
-        let reach = distances_from(&grid, &[snake.head], 0, 0);
-        if count_reachable(&reach) - 1 < snake.body.len() as i32 {
-            score += ENEMY_TRAPPED_BONUS;
+        // >>> Num duelo, a BFS "de todas as adversarias" ja e a BFS dela:
+        // >>> reaproveitamos em vez de fazer outra (a busca fica mais rapida).
+        let space = if enemy_heads.len() == 1 {
+            count_reachable(&theirs) - 1
+        } else {
+            count_reachable(&distances_from(&grid, &[snake.head], 0, 0)) - 1
+        };
+        enemy_space_total += space;
+        if space < snake.body.len() as i32 {
+            score += weights.enemy_trapped;
         }
     }
 
     // Territorio: em empate de distancia, a casa e de quem for maior.
-    score += territory(&mine, &theirs, my_length > longest_enemy) as i64 * TERRITORY_WEIGHT;
+    score += territory(&mine, &theirs, my_length > longest_enemy) as i64 * weights.territory;
 
     // Tamanho: ser maior ganha cabeca com cabeca. Depois de 4 a mais, tanto faz.
-    let lead = (my_length - longest_enemy) as i64;
-    score += lead.min(MAX_USEFUL_LEAD) * LENGTH_WEIGHT;
+    score += lead.min(MAX_USEFUL_LEAD) * weights.length;
 
     // Comida: a mais perto que alcancamos.
     let mut nearest_food: Option<u32> = None;
@@ -139,24 +171,25 @@ pub fn evaluate(state: &GameState, me_id: &str) -> i64 {
                 score -= STARVING_PENALTY;
             }
             if hungry {
-                score -= distance as i64 * FOOD_WEIGHT;
+                score -= distance as i64 * weights.food;
             }
         }
         None => {
             if hungry {
-                score -= FOOD_HORIZON * FOOD_WEIGHT;
+                score -= FOOD_HORIZON * weights.food;
             }
         }
     }
 
-    // Caca: sendo a maior, chegar perto da cabeca adversaria, mais ainda no fim.
+    // Sendo a maior: cacar (chegar perto da cabeca) e apertar (tirar espaco
+    // dela). As duas coisas pesam mais conforme o turno 99 se aproxima.
     if lead > 0 {
         let mut nearest = i32::MAX;
         for head in &enemy_heads {
             nearest = nearest.min(manhattan(me.head, *head));
         }
-        let urgency = 1 + (state.turn.max(0) / TURNS_PER_URGENCY_STEP) as i64;
-        score -= nearest as i64 * HUNT_WEIGHT * urgency;
+        score -= nearest as i64 * weights.hunt * urgency;
+        score -= enemy_space_total as i64 * weights.squeeze * urgency;
     }
 
     score
