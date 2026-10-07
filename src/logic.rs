@@ -18,14 +18,14 @@
 
 /// Tempo normal de busca por jogada.
 #[cfg(not(test))]
-const SEARCH_BUDGET_MS: u64 = 250;
+const SEARCH_BUDGET_MS: u64 = 180;
 // >>> Nos testes a busca pensa pouco, para a bateria de testes ser rapida.
 #[cfg(test)]
 const SEARCH_BUDGET_MS: u64 = 10;
 /// Nunca usar mais que (timeout da partida - esta margem): sobra para a rede.
 const RESPONSE_MARGIN_MS: u64 = 150;
 /// Primeira jogada de um processo novo (cold start): pensar menos.
-const COLD_START_BUDGET_MS: u64 = 100;
+const COLD_START_BUDGET_MS: u64 = 60;
 /// Se a arena mediu uma latencia acima disto na jogada anterior, pensar metade.
 const SLOW_LATENCY_MS: u64 = 420;
 
