@@ -310,11 +310,15 @@ fn is_eliminated(state: &GameState, snake: &Battlesnake) -> bool {
     // >>> Um campo extra da arena dizendo como ela morreu.
     for (key, value) in &snake.extra {
         if DEATH_FIELDS.contains(&key.to_lowercase().as_str()) {
+            // >>> Na duvida, "vazio" quer dizer viva: texto vazio, null, false,
+            // >>> zero, lista ou objeto sem nada dentro.
             let filled = match value {
                 serde_json::Value::Null => false,
                 serde_json::Value::String(text) => !text.is_empty(),
                 serde_json::Value::Bool(flag) => *flag,
-                _ => true,
+                serde_json::Value::Number(number) => number.as_f64().map_or(false, |n| n != 0.0),
+                serde_json::Value::Array(items) => !items.is_empty(),
+                serde_json::Value::Object(fields) => !fields.is_empty(),
             };
             if filled {
                 return true;
@@ -390,7 +394,10 @@ mod tests {
         let mut alive = snake("viva", &[(9, 1), (9, 2), (9, 3)], 50);
         alive.extra.insert("EliminatedCause".to_string(), json!(""));
         alive.extra.insert("Death".to_string(), json!(null));
-        assert_eq!(remaining(&state(vec![me, dead, alive])), vec!["eu", "viva"]);
+        let mut alive2 = snake("viva2", &[(9, 5), (9, 6), (9, 7)], 50);
+        alive2.extra.insert("death".to_string(), json!({}));
+        alive2.extra.insert("eliminated_cause".to_string(), json!(0));
+        assert_eq!(remaining(&state(vec![me, dead, alive, alive2])), vec!["eu", "viva", "viva2"]);
     }
 
     #[test]
