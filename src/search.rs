@@ -224,10 +224,12 @@ fn lean_copy(state: &GameState) -> GameState {
         snake.name.clear();
         snake.latency = None;
         snake.shout = None;
+        snake.extra.clear();
     }
     lean.you.name.clear();
     lean.you.latency = None;
     lean.you.shout = None;
+    lean.you.extra.clear();
     lean
 }
 
@@ -336,6 +338,7 @@ mod tests {
             body,
             latency: None,
             shout: None,
+            extra: Default::default(),
         }
     }
 
@@ -458,6 +461,7 @@ mod speed {
             body: body(cells),
             latency: Some("123".to_string()),
             shout: Some("uma frase qualquer de exemplo".to_string()),
+            extra: Default::default(),
         };
         let me = snake("6b6886f0-1234-4321-abcd-0123456789ab", &[(5, 5), (5, 4), (5, 3), (4, 3), (3, 3), (3, 4), (3, 5), (3, 6), (3, 7), (3, 8)]);
         let enemy = snake("b85cd55e-1234-4321-abcd-0123456789ab", &[(8, 6), (8, 5), (8, 4), (9, 4), (9, 3), (9, 2), (8, 2), (7, 2)]);
@@ -475,5 +479,6 @@ mod speed {
         let ranking = crate::safety::choose_move(&state).ranking;
         let result = search(&state, Instant::now() + Duration::from_millis(200), &ranking, &crate::eval::EVAL).unwrap();
         println!("\n200 ms: {} tabuleiros, profundidade {}", result.nodes, result.depth);
+
     }
 }

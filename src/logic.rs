@@ -32,7 +32,7 @@ const SLOW_LATENCY_MS: u64 = 420;
 use crate::board::Direction;
 use crate::eval::{EvalWeights, EVAL, WIN};
 use crate::models::GameState;
-use crate::{safety, search};
+use crate::{board, safety, search};
 use serde_json::{json, Value};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -92,6 +92,45 @@ pub fn decide(state: &GameState, deadline: Instant) -> (Direction, String) {
 /// A decisao com os pesos de avaliacao escolhidos (o self-play usa isto).
 pub fn decide_with(state: &GameState, deadline: Instant, weights: &EvalWeights) -> (Direction, String) {
     let started = Instant::now();
+
+    // >>> A arena manda cobras JA ELIMINADAS na lista (visto em 08/10). Tiramos
+    // >>> antes de pensar; sem isso, um "cadaver" vira parede e adversaria.
+    let (clean, removed) = match catch_unwind(AssertUnwindSafe(|| board::remove_eliminated(state))) {
+        Ok(result) => result,
+        Err(_) => (state.clone(), 0),
+    };
+    let notes = arena_notes(state, removed);
+    let (direction, shout) = decide_clean(&clean, deadline, weights, started);
+    (direction, format!("{shout}{notes}"))
+}
+
+/// Diagnostico para o shout: quantas mortas tiramos e os campos extras que a
+/// arena mandou (para descobrir o formato dela pelos quadros das partidas).
+fn arena_notes(state: &GameState, removed: usize) -> String {
+    let mut keys: Vec<&str> = Vec::new();
+    for snake in &state.board.snakes {
+        for key in snake.extra.keys() {
+            if !keys.contains(&key.as_str()) {
+                keys.push(key.as_str());
+            }
+        }
+    }
+    keys.sort();
+    let mut notes = String::new();
+    if removed > 0 {
+        notes.push_str(&format!(" mortas{removed}"));
+    }
+    if !keys.is_empty() {
+        let mut list = keys.join(",");
+        // >>> O shout aceita ate 256 caracteres; a lista nao pode estourar isso.
+        list.truncate(80);
+        notes.push_str(&format!(" x:{list}"));
+    }
+    notes
+}
+
+/// A decisao (rede de seguranca + busca) num estado ja sem cobras eliminadas.
+fn decide_clean(state: &GameState, deadline: Instant, weights: &EvalWeights, started: Instant) -> (Direction, String) {
 
     // >>> `catch_unwind` segura um panico (erro grave) que aconteca la dentro.
     // >>> Sem ele, um panico derrubaria a resposta inteira.
@@ -163,6 +202,7 @@ mod tests {
             length: 3,
             latency: Some("50".to_string()),
             shout: None,
+            extra: Default::default(),
         };
 
         GameState {
@@ -333,6 +373,7 @@ mod tests {
             head,
             latency: None,
             shout: None,
+            extra: Default::default(),
         }
     }
 
@@ -382,6 +423,66 @@ mod tests {
                 ["up", "down", "left", "right"].contains(&direction.as_str()),
                 "rodada {round}: direção inválida {direction}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod arena_mortas {
+    use crate::models::GameState;
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    /// Partida 4e1ffb00 (3 cobras), turno 87. A "THE BODÃO AO QUADRADO" morreu
+    /// na parede no turno 10, mas a arena continuou mandando o corpo dela na
+    /// lista. A b0707 achou que (5,9) estava ocupada, respondeu "sem saida" e
+    /// bateu no proprio corpo. A saida certa e a esquerda.
+    ///
+    /// y=10  e e e e e m b b . . .     m = cadaver (cabeca fora, em (5,11))
+    /// y= 9  E e e e e m H b . . .     H = nos
+    /// y= 8  . . . . . m b b . . .
+    #[test]
+    fn nao_trata_cobra_morta_como_parede() {
+        let c = |v: &[(i32, i32)]| v.iter().map(|(x, y)| json!({"x": x, "y": y})).collect::<Vec<_>>();
+        let snake = |id: &str, health: i32, body: &[(i32, i32)], cause: &str| json!({"id": id, "name": id, "health": health,
+            "body": c(body), "head": c(body)[0], "length": body.len(), "latency": "200", "shout": "", "EliminatedCause": cause});
+        let me = snake("eu", 98, &[(6, 9), (6, 10), (7, 10), (7, 9), (7, 8), (6, 8), (6, 7), (6, 6)], "");
+        let corpse = snake("morta", 94, &[(5, 11), (5, 10), (5, 9), (5, 8)], "wall-collision");
+        let bodao = snake("bodao", 90, &[(0, 9), (0, 10), (1, 10), (2, 10), (3, 10), (4, 10), (4, 9), (3, 9), (2, 9), (1, 9)], "");
+        let s: GameState = serde_json::from_value(json!({"game": {"id": "g", "ruleset": {}, "timeout": 500}, "turn": 87,
+            "board": {"width": 11, "height": 11, "food": c(&[(5, 10)]), "hazards": [], "snakes": [corpse, me.clone(), bodao]},
+            "you": me})).unwrap();
+        let (direction, shout) = super::decide(&s, Instant::now() + Duration::from_millis(100));
+        assert_eq!(direction.as_str(), "left", "{shout}");
+        assert!(shout.contains("mortas1"), "{shout}");
+    }
+}
+
+/// Ferramenta de depuracao: rejoga turnos de uma partida real da arena.
+/// O arquivo (uma requisicao /move por linha) sai de um script que converte os
+/// quadros baixados. Rode com:
+/// REPLAY=caminho.jsonl cargo test --release rejogar_partida -- --ignored --nocapture
+#[cfg(test)]
+mod replay {
+    use crate::models::GameState;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    #[ignore]
+    fn rejogar_partida() {
+        let path = match std::env::var("REPLAY") {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let budget: u64 = std::env::var("BUDGET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(180);
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        for line in text.lines() {
+            let state: GameState = match serde_json::from_str(line) {
+                Ok(state) => state,
+                Err(_) => continue,
+            };
+            let (direction, shout) = super::decide(&state, Instant::now() + Duration::from_millis(budget));
+            println!("turno {:3} -> {:5} {}", state.turn, direction.as_str(), shout);
         }
     }
 }

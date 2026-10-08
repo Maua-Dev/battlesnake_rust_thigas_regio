@@ -33,6 +33,9 @@ enum Player {
     Greedy,
     /// Gira atras da propria cauda e so sai para comer com vida baixa.
     Chicken,
+    /// Chicken cuidadosa (parecida com a tenhoTDAH da arena): tambem foge de
+    /// cabeca com cabeca e de becos, e come mais cedo.
+    CarefulChicken,
     /// A cobra completa (rede de seguranca + busca), pensando tantos ms por jogada.
     Search(u64, EvalWeights),
 }
@@ -44,6 +47,7 @@ impl Player {
             Player::RandomSafe => "aleatoria".to_string(),
             Player::Greedy => "gulosa".to_string(),
             Player::Chicken => "chicken".to_string(),
+            Player::CarefulChicken => "cuidadosa".to_string(),
             Player::Search(ms, weights) => format!("{}{ms}", weights.tag),
         }
     }
@@ -83,6 +87,7 @@ fn new_game(player_count: usize, rng: &mut StdRng) -> GameState {
             length: 3,
             latency: None,
             shout: None,
+            extra: Default::default(),
         });
         // Uma comida numa das diagonais da cobra.
         let mut options: Vec<Coord> = Vec::new();
@@ -167,10 +172,13 @@ fn decide(player: &Player, view: &GameState, rng: &mut StdRng) -> Direction {
                 legal.iter().filter(|i| nearest_food_distance(view, i.target) == best).collect();
             options.choose(rng).map(|i| i.direction).unwrap_or(Direction::Up)
         }
-        Player::Chicken => {
-            let open: Vec<&&safety::MoveInfo> = legal.iter().filter(|i| !i.trapped).collect();
+        Player::Chicken | Player::CarefulChicken => {
+            let careful = matches!(player, Player::CarefulChicken);
+            let open: Vec<&&safety::MoveInfo> = legal.iter().filter(|i| !i.trapped && !(careful && i.head_risk)).collect();
+            let open = if open.is_empty() { legal.iter().filter(|i| !i.trapped).collect() } else { open };
             let pool: Vec<&&safety::MoveInfo> = if open.is_empty() { legal.iter().collect() } else { open };
-            if view.you.health < 25 {
+            let hungry_below = if careful { 40 } else { 25 };
+            if view.you.health < hungry_below {
                 // Com fome: sai do canto para comer.
                 let mut best = pool[0];
                 for i in &pool {
@@ -404,12 +412,13 @@ fn tempo_da_busca() {
 #[ignore]
 fn selfplay_calibracao_busca() {
     let candidates = [
+        // 07/10: caca 100, 300 e 1000 eliminaram MENOS que a caca 20 (a cobra
+        // persegue a cabeca e esquece de comer). Fica a base.
         EvalWeights { tag: "base", ..EVAL },
-        EvalWeights { tag: "aperto5", squeeze: 5, ..EVAL },
-        EvalWeights { tag: "ap5ter30", squeeze: 5, territory: 30, ..EVAL },
     ];
     for weights in candidates {
         run_match(weights.tag, &[Player::Search(50, weights), Player::Ours(SETTINGS)], 150, 51);
+        run_match(weights.tag, &[Player::Search(50, weights), Player::Chicken], 60, 52);
     }
 }
 
@@ -446,4 +455,14 @@ fn selfplay_relatorio() {
     run_match("v0510 x gulosa", &[old, Player::Greedy], 200, 3);
     run_match("v0606 x aleatoria", &[new, Player::RandomSafe], 200, 4);
     run_match("4 cobras: v0606, v0510, gulosa, chicken", &[new, old, Player::Greedy, Player::Chicken], 200, 5);
+}
+
+
+/// Contra a chicken cuidadosa (estilo tenhoTDAH): pensar mais = eliminar mais?
+#[test]
+#[ignore]
+fn selfplay_cuidadosa() {
+    for ms in [25, 50, 100] {
+        run_match(&format!("busca {ms} ms x cuidadosa"), &[Player::Search(ms, EVAL), Player::CarefulChicken], 60, 61);
+    }
 }

@@ -34,6 +34,12 @@ pub struct Battlesnake {
     pub latency: Option<String>,
     #[serde(default)]
     pub shout: Option<String>,
+    /// Campos que a arena da Mauá manda a mais (o Battlesnake oficial não manda).
+    // >>> `flatten` junta aqui todo campo do JSON que não tem nome acima.
+    // >>> Em 08/10 vimos que a arena manda cobras JA ELIMINADAS na lista; algum
+    // >>> campo extra (como "EliminatedCause") pode dizer quem morreu.
+    #[serde(flatten)]
+    pub extra: HashMap<String, Value>,
 }
 
 /// O tabuleiro no turno atual.

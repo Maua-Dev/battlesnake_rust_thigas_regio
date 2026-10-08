@@ -138,6 +138,7 @@ mod tests {
             body,
             latency: None,
             shout: None,
+            extra: Default::default(),
         }
     }
 
