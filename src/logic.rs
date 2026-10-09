@@ -108,11 +108,16 @@ pub fn decide_with(state: &GameState, deadline: Instant, weights: &EvalWeights) 
 /// arena mandou (para descobrir o formato dela pelos quadros das partidas).
 fn arena_notes(state: &GameState, removed: usize) -> String {
     let mut keys: Vec<&str> = Vec::new();
+    let mut latencies: Vec<&str> = Vec::new();
     for snake in &state.board.snakes {
         for key in snake.extra.keys() {
-            if !keys.contains(&key.as_str()) {
+            // >>> Estes dois sao da API oficial e vem sempre: nao ajudam a depurar.
+            if key != "customizations" && key != "squad" && !keys.contains(&key.as_str()) {
                 keys.push(key.as_str());
             }
+        }
+        if snake.id != state.you.id {
+            latencies.push(snake.latency.as_deref().unwrap_or("-"));
         }
     }
     keys.sort();
@@ -125,6 +130,11 @@ fn arena_notes(state: &GameState, removed: usize) -> String {
         // >>> O shout aceita ate 256 caracteres; a lista nao pode estourar isso.
         list.truncate(80);
         notes.push_str(&format!(" x:{list}"));
+    }
+    // >>> Com 3 ou mais cobras: a latencia que a arena mandou de cada adversaria.
+    // >>> Serve para confirmar que as mortas chegam com "0".
+    if latencies.len() >= 2 {
+        notes.push_str(&format!(" l:{}", latencies.join(",")));
     }
     notes
 }

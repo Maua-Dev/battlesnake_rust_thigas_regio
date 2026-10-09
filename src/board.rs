@@ -307,6 +307,12 @@ fn is_eliminated(state: &GameState, snake: &Battlesnake) -> bool {
     if snake.health <= 0 || head.x < 0 || head.y < 0 || head.x >= state.board.width || head.y >= state.board.height {
         return true;
     }
+    // >>> Nos quadros da arena, toda cobra morta fica com latencia "0" a partir do
+    // >>> turno seguinte ao da morte, e nenhuma viva tem "0" depois do turno 0
+    // >>> (237 partidas e 36 mil quadros de cobra viva conferidos em 08/10).
+    if state.turn >= 1 && snake.latency.as_deref() == Some("0") {
+        return true;
+    }
     // >>> Um campo extra da arena dizendo como ela morreu.
     for (key, value) in &snake.extra {
         if DEATH_FIELDS.contains(&key.to_lowercase().as_str()) {
@@ -398,6 +404,21 @@ mod tests {
         alive2.extra.insert("death".to_string(), json!({}));
         alive2.extra.insert("eliminated_cause".to_string(), json!(0));
         assert_eq!(remaining(&state(vec![me, dead, alive, alive2])), vec!["eu", "viva", "viva2"]);
+    }
+
+    #[test]
+    fn tira_quem_tem_latencia_zero_depois_do_turno_0() {
+        // Cadaver no meio do tabuleiro (morreu batendo num corpo): so a
+        // latencia "0" denuncia. No turno 0 todo mundo tem "0" e ninguem sai.
+        let me = snake("eu", &[(9, 9), (9, 8), (9, 7)], 90);
+        let mut corpse = snake("cadaver", &[(5, 5), (5, 4), (5, 3)], 60);
+        corpse.latency = Some("0".to_string());
+        let mut alive = snake("viva", &[(1, 1), (1, 2), (1, 3)], 50);
+        alive.latency = Some("123".to_string());
+        let mut s = state(vec![me, corpse, alive]);
+        assert_eq!(remaining(&s), vec!["eu", "viva"]);
+        s.turn = 0;
+        assert_eq!(remaining(&s), vec!["eu", "cadaver", "viva"]);
     }
 
     #[test]

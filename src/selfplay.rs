@@ -414,11 +414,14 @@ fn selfplay_calibracao_busca() {
     let candidates = [
         // 07/10: caca 100, 300 e 1000 eliminaram MENOS que a caca 20 (a cobra
         // persegue a cabeca e esquece de comer). Fica a base.
+        // 08/10: territorio 20 e 40 ficaram iguais ou piores que a base
+        // (x v0606: 66% base, 64% ter20, 62% ter40). Fica a base.
         EvalWeights { tag: "base", ..EVAL },
     ];
     for weights in candidates {
         run_match(weights.tag, &[Player::Search(50, weights), Player::Ours(SETTINGS)], 150, 51);
-        run_match(weights.tag, &[Player::Search(50, weights), Player::Chicken], 60, 52);
+        run_match(weights.tag, &[Player::Search(50, weights), Player::CarefulChicken], 60, 52);
+        run_match(weights.tag, &[Player::Search(50, weights), Player::Ours(SETTINGS), Player::Greedy, Player::CarefulChicken], 60, 53);
     }
 }
 
