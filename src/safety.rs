@@ -32,7 +32,7 @@ pub struct Settings {
     /// Territorio (Voronoi): cada casa que alcancamos antes das adversarias.
     pub territory_weight: i64,
     /// Caca: quando somos a maior, cada passo mais perto da cabeca adversaria.
-    /// Multiplicado pela urgencia, que cresce ate o turno 99.
+    /// Multiplicado pela urgencia, que cresce ate o turno 99 e para ali.
     pub hunt_weight: i64,
     /// Bonus por deixar uma adversaria presa num espaco menor que ela.
     pub trap_enemy_bonus: i64,
@@ -81,8 +81,10 @@ const SCORE_NO_HEAD_RISK: i64 = 100_000;
 const SCORE_PER_SPACE_CELL: i64 = 100;
 /// Comida: a nota cresce quanto mais perto, ate este horizonte de passos.
 const FOOD_HORIZON: i64 = 30;
-/// A urgencia da caca sobe 1 ponto a cada tantos turnos (1 no inicio, 4 no turno 99).
+/// A urgencia da caca sobe 1 ponto a cada tantos turnos (1 no inicio)...
 const TURNS_PER_URGENCY_STEP: i32 = 33;
+/// ...ate este teto (alcancado no turno 99).
+const MAX_URGENCY: i64 = 4;
 
 use crate::board::{
     count_reachable, distances_from, manhattan, territory, Direction, Grid, ALL_DIRECTIONS, UNREACHABLE,
@@ -251,7 +253,7 @@ pub fn analyze_moves_with(state: &GameState, settings: &Settings) -> Vec<MoveInf
         me.health < settings.hungry_health || my_length < longest_enemy + settings.wanted_length_lead;
     let critical = me.health < settings.critical_health;
     let i_am_biggest = !enemies.is_empty() && my_length > longest_enemy;
-    let urgency = 1 + (state.turn.max(0) / TURNS_PER_URGENCY_STEP) as i64;
+    let urgency = (1 + (state.turn.max(0) / TURNS_PER_URGENCY_STEP) as i64).min(MAX_URGENCY);
 
     for direction in ALL_DIRECTIONS {
         let target = direction.step(my_head);

@@ -18,7 +18,7 @@ const INFINITY: i64 = i64::MAX / 4;
 use crate::board::{manhattan, Direction, ALL_DIRECTIONS};
 use crate::eval::{evaluate, terminal_value, EvalWeights, WIN};
 use crate::models::{Coord, GameState};
-use crate::rules::{apply_turn, ARENA_LAST_TURN};
+use crate::rules::apply_turn;
 use std::time::Instant;
 
 /// O que a busca decidiu e quanto ela conseguiu enxergar.
@@ -65,10 +65,7 @@ pub fn search(state: &GameState, deadline: Instant, root_order: &[Direction], we
     let mut searcher = Searcher { me_id: me_id.to_string(), weights: *weights, deadline, nodes: 0, out_of_time: false };
     let mut order: Vec<Direction> = root_order.to_vec();
     let mut best: Option<SearchResult> = None;
-    // >>> Depois do turno 99 nao ha jogo: nao adianta olhar mais longe que isso.
-    let max_depth = MAX_DEPTH.min(ARENA_LAST_TURN - state.turn).max(1);
-
-    for depth in 1..=max_depth {
+    for depth in 1..=MAX_DEPTH {
         let mut alpha = -INFINITY;
         let mut depth_best: Option<(Direction, i64)> = None;
         for direction in order.iter().copied() {

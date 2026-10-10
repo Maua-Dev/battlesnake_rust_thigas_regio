@@ -8,7 +8,7 @@
 
 use crate::board::Direction;
 use crate::models::{Battlesnake, Board, Coord, Game, GameState};
-use crate::rules::{self, ARENA_LAST_TURN};
+use crate::rules;
 use crate::eval::{EvalWeights, EVAL};
 use crate::safety::{self, Settings, SETTINGS, SETTINGS_V0510};
 use rand::rngs::StdRng;
@@ -16,6 +16,10 @@ use rand::seq::{IndexedRandom, SliceRandom};
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+/// As partidas locais param aqui, se ninguem morrer antes. Na arena nao ha
+/// limite pratico (a partida mais longa que vimos foi ate o turno 603).
+const SELFPLAY_MAX_TURNS: i32 = 500;
 
 /// Regras de comida do modo standard: sempre pelo menos 1 comida, e 15% de
 /// chance de nascer mais uma a cada turno.
@@ -213,7 +217,7 @@ fn play_game(players: &[Player], rng: &mut StdRng) -> Outcome {
     let mut state = new_game(players.len(), rng);
     let mut slowest_ms: f64 = 0.0;
 
-    while state.board.snakes.len() > 1 && state.turn < ARENA_LAST_TURN {
+    while state.board.snakes.len() > 1 && state.turn < SELFPLAY_MAX_TURNS {
         let mut moves = Vec::new();
         for snake in &state.board.snakes {
             let index: usize = snake.id.parse().unwrap_or(0);
@@ -270,8 +274,8 @@ fn play_many(players: &[Player], games: usize, seed: u64) -> Vec<Outcome> {
 }
 
 /// Joga varias partidas e imprime, para cada jogador: vitorias por eliminacao,
-/// sobrevivencias ate o turno 99 (o "cara ou coroa" da arena) e mortes.
-/// Devolve a pontuacao do jogador 0: vitoria = 1, turno 99 vivo = 1/(vivos), morte = 0.
+/// sobrevivencias ate o fim (SELFPLAY_MAX_TURNS) e mortes.
+/// Devolve a pontuacao do jogador 0: vitoria = 1, viva no fim = 1/(vivos), morte = 0.
 fn run_match(label: &str, players: &[Player], games: usize, seed: u64) -> f64 {
     let count = players.len();
     let mut sole_wins = vec![0; count];
@@ -305,7 +309,7 @@ fn run_match(label: &str, players: &[Player], games: usize, seed: u64) -> f64 {
 
     println!("\n== {label}: {games} partidas, media de {} turnos, decisao mais lenta {:.1} ms",
         total_turns / games as i32, slowest);
-    println!("   {:10} {:>9} {:>14} {:>16} {:>7} {:>7}", "jogador", "eliminou", "viva no t99", "(maior no t99)", "morreu", "pontos");
+    println!("   {:10} {:>9} {:>14} {:>16} {:>7} {:>7}", "jogador", "eliminou", "viva no fim", "(maior no fim)", "morreu", "pontos");
     for i in 0..count {
         println!(
             "   {:10} {:>9} {:>14} {:>16} {:>7} {:>6.0}%",
@@ -329,7 +333,7 @@ fn selfplay_curto_roda_sem_panico() {
 }
 
 /// Calibracao: varias combinacoes de pesos contra as mesmas adversarias.
-/// Imprime a pontuacao (vitoria = 1, viva no turno 99 = 1/vivas) de cada uma.
+/// Imprime a pontuacao (vitoria = 1, viva no fim = 1/vivas) de cada uma.
 #[test]
 #[ignore]
 fn selfplay_calibracao() {
@@ -382,7 +386,7 @@ fn tempo_da_busca() {
         let mut rng = StdRng::seed_from_u64(900 + game);
         let count = if game % 2 == 0 { 2 } else { 4 };
         let mut state = new_game(count, &mut rng);
-        while state.board.snakes.len() > 1 && state.turn < ARENA_LAST_TURN {
+        while state.board.snakes.len() > 1 && state.turn < SELFPLAY_MAX_TURNS {
             let mut moves = Vec::new();
             for (i, snake) in state.board.snakes.iter().enumerate() {
                 let mut view = state.clone();
@@ -407,7 +411,7 @@ fn tempo_da_busca() {
 }
 
 /// Calibracao da busca: varias combinacoes de pesos contra a v0606, que
-/// sobrevive bem (parecida com as Tokuji). O que importa: eliminar antes do turno 99.
+/// sobrevive bem (parecida com as Tokuji). O que importa: eliminar sem morrer.
 #[test]
 #[ignore]
 fn selfplay_calibracao_busca() {

@@ -10,9 +10,9 @@
 use crate::board::Direction;
 use crate::models::{Coord, GameState};
 
-/// Ultimo turno das partidas na arena da Mauá: em 06/10 vimos as partidas
-/// terminarem no turno 99 com as cobras vivas.
-pub const ARENA_LAST_TURN: i32 = 99;
+// >>> A arena NAO encerra no turno 99. A API de quadros devolve no maximo 100
+// >>> por pedido (descoberto em 10/10): as partidas seguem ate sobrar uma cobra.
+// >>> A arena oficial so para no turno 5000.
 
 /// Uma cobra que saiu do jogo neste turno e o motivo (nomes iguais aos da arena).
 #[derive(Debug, Clone, PartialEq)]

@@ -22,8 +22,10 @@ const MAX_USEFUL_LEAD: i64 = 4;
 const FOOD_HORIZON: i64 = 30;
 const HUNGRY_HEALTH: i32 = 50;
 const WANTED_LENGTH_LEAD: i32 = 3;
-/// A urgencia da caca sobe 1 ponto a cada tantos turnos (1 no inicio, 4 no turno 99).
+/// A urgencia da caca sobe 1 ponto a cada tantos turnos (1 no inicio)...
 const TURNS_PER_URGENCY_STEP: i32 = 33;
+/// ...ate este teto (alcancado no turno 99). Caçar mais forte que isso piora.
+const MAX_URGENCY: i64 = 4;
 
 /// Os pesos que o self-play ajusta. `Copy` deixa passar a struct por valor.
 #[derive(Debug, Clone, Copy)]
@@ -58,7 +60,6 @@ pub const EVAL: EvalWeights = EvalWeights {
 
 use crate::board::{count_reachable, distances_from, manhattan, territory, Grid, UNREACHABLE};
 use crate::models::GameState;
-use crate::rules::ARENA_LAST_TURN;
 
 // ============================================================================
 // ||  BLOCO: FIM DE JOGO
@@ -81,11 +82,6 @@ pub fn terminal_value(state: &GameState, me_id: &str) -> Option<i64> {
     }
     if others_alive == 0 {
         return Some(WIN - turn * TURN_VALUE);
-    }
-    // >>> No turno 99 a arena encerra a partida e, com mais de uma viva, o
-    // >>> desempate parece sorteio. Chegar la vale "meio a meio": nota neutra.
-    if state.turn >= ARENA_LAST_TURN {
-        return Some(0);
     }
     None
 }
@@ -122,7 +118,7 @@ pub fn evaluate(state: &GameState, me_id: &str, weights: &EvalWeights) -> i64 {
     let mine = distances_from(&grid, &[me.head], 0, 0);
     let theirs = distances_from(&grid, &enemy_heads, 0, 0);
     let lead = (my_length - longest_enemy) as i64;
-    let urgency = 1 + (state.turn.max(0) / TURNS_PER_URGENCY_STEP) as i64;
+    let urgency = (1 + (state.turn.max(0) / TURNS_PER_URGENCY_STEP) as i64).min(MAX_URGENCY);
     let mut score: i64 = 0;
 
     // Becos: o nosso (muito ruim) e o das adversarias (muito bom).
@@ -182,7 +178,7 @@ pub fn evaluate(state: &GameState, me_id: &str, weights: &EvalWeights) -> i64 {
     }
 
     // Sendo a maior: cacar (chegar perto da cabeca) e apertar (tirar espaco
-    // dela). As duas coisas pesam mais conforme o turno 99 se aproxima.
+    // dela). As duas coisas pesam mais com o passar dos turnos (ate o teto).
     if lead > 0 {
         let mut nearest = i32::MAX;
         for head in &enemy_heads {

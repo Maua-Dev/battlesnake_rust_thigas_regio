@@ -466,6 +466,32 @@ mod arena_mortas {
         assert_eq!(direction.as_str(), "left", "{shout}");
         assert!(shout.contains("mortas1"), "{shout}");
     }
+
+    /// Partida 2374c1d1 (duelo x GreenNeedle), turno 95. A cobra antiga achava
+    /// que a partida acabava no turno 99 e olhava so ate la: foi para a direita
+    /// (comida em (4,0)), por baixo do corpo da GreenNeedle, e ficou presa na
+    /// linha de baixo. Morreu no turno 103.
+    ///
+    /// y=3  . . a c c . G      a = nos, A = nossa cabeca
+    /// y=2  . a a . c c c      c = GreenNeedle, G = cabeca dela
+    /// y=1  . a a a c c .      * = comida
+    /// y=0  * . . A * . .
+    #[test]
+    fn nao_entra_no_beco_que_fecha_depois_do_turno_99() {
+        let c = |v: &[(i32, i32)]| v.iter().map(|(x, y)| json!({"x": x, "y": y})).collect::<Vec<_>>();
+        let snake = |id: &str, health: i32, body: &[(i32, i32)]| json!({"id": id, "name": id, "health": health,
+            "body": c(body), "head": c(body)[0], "length": body.len(), "latency": "200", "shout": ""});
+        let me = snake("eu", 85, &[(3, 0), (3, 1), (2, 1), (1, 1), (1, 2), (2, 2), (2, 3), (2, 4), (2, 5), (2, 6), (2, 7)]);
+        let needle = snake("needle", 70, &[(6, 3), (6, 2), (5, 2), (5, 1), (4, 1), (4, 2), (4, 3), (3, 3), (3, 4)]);
+        let s: GameState = serde_json::from_value(json!({"game": {"id": "g", "ruleset": {}, "timeout": 500}, "turn": 95,
+            "board": {"width": 11, "height": 11, "food": c(&[(0, 0), (10, 6), (4, 0)]), "hazards": [], "snakes": [me.clone(), needle]},
+            "you": me})).unwrap();
+        // >>> Precisa de profundidade 6 para ver o beco. Os testes rodam sem
+        // >>> otimizacao (bem mais lentos que na arena): 3 s dao folga ate no CI.
+        let (direction, shout) = super::decide(&s, Instant::now() + Duration::from_millis(3000));
+        assert_ne!(direction.as_str(), "right", "{shout}");
+        assert!(!shout.contains("perde"), "{shout}");
+    }
 }
 
 /// Ferramenta de depuracao: rejoga turnos de uma partida real da arena.
