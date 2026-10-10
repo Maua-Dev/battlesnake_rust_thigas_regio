@@ -28,10 +28,14 @@ const RESPONSE_MARGIN_MS: u64 = 150;
 const COLD_START_BUDGET_MS: u64 = 60;
 /// Se a arena mediu uma latencia acima disto na jogada anterior, pensar metade.
 const SLOW_LATENCY_MS: u64 = 420;
+/// Quantos turnos antes do limite da arena a resposta passa a ser segurada
+/// (2 = turnos 97, 98 e 99). Ver o bloco ESPERA NO FIM DA PARTIDA.
+const FINAL_HOLD_TURNS: i32 = 2;
 
 use crate::board::Direction;
 use crate::eval::{EvalWeights, EVAL, WIN};
 use crate::models::GameState;
+use crate::rules::ARENA_LAST_TURN;
 use crate::{board, safety, search};
 use serde_json::{json, Value};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -78,8 +82,16 @@ pub fn end(state: &GameState) {
 // ============================================================================
 
 pub fn get_move(state: &GameState) -> Value {
-    let deadline = Instant::now() + search_budget(state);
-    let (direction, shout) = decide(state, deadline);
+    let arrived = Instant::now();
+    // >>> `swap` marca o processo como "aquecido" e devolve como estava antes.
+    let cold = !WARMED_UP.swap(true, Ordering::Relaxed);
+    let deadline = arrived + search_budget(state, cold);
+    let (direction, mut shout) = decide(state, deadline);
+    if let Some(hold) = final_hold(state, cold) {
+        let wait = hold.saturating_sub(arrived.elapsed());
+        std::thread::sleep(wait);
+        shout.push_str(&format!(" espera{}", wait.as_millis()));
+    }
     info!("MOVE {}: {}", state.turn, shout);
     json!({ "move": direction.as_str(), "shout": shout })
 }
@@ -176,21 +188,52 @@ fn decide_clean(state: &GameState, deadline: Instant, weights: &EvalWeights, sta
     }
 }
 
-/// Quanto tempo a busca pode usar nesta jogada.
-fn search_budget(state: &GameState) -> Duration {
+/// Quanto tempo a busca pode usar nesta jogada. `cold` = primeira jogada do processo.
+fn search_budget(state: &GameState, cold: bool) -> Duration {
     let timeout = state.game.timeout as u64;
     let mut budget = SEARCH_BUDGET_MS.min(timeout.saturating_sub(RESPONSE_MARGIN_MS));
-    // >>> `swap` marca o processo como "aquecido" e devolve como estava antes.
-    if !WARMED_UP.swap(true, Ordering::Relaxed) {
+    if cold {
         budget = budget.min(COLD_START_BUDGET_MS);
     }
-    let last_latency = state.you.latency.as_deref().and_then(|text| text.parse::<u64>().ok());
-    if let Some(latency) = last_latency {
-        if latency > SLOW_LATENCY_MS {
-            budget /= 2;
-        }
+    if previous_latency_was_slow(state) {
+        budget /= 2;
     }
     Duration::from_millis(budget)
+}
+
+/// A arena mediu mais de SLOW_LATENCY_MS na nossa jogada anterior?
+fn previous_latency_was_slow(state: &GameState) -> bool {
+    let last_latency = state.you.latency.as_deref().and_then(|text| text.parse::<u64>().ok());
+    match last_latency {
+        Some(latency) => latency > SLOW_LATENCY_MS,
+        None => false,
+    }
+}
+
+// ============================================================================
+// ||  BLOCO: ESPERA NO FIM DA PARTIDA
+// ||  O QUE FAZ: nos turnos 97, 98 e 99, segura a resposta ate completar
+// ||             (timeout - RESPONSE_MARGIN_MS) = 350 ms desde a chegada.
+// ||  POR QUE:   a arena encerra a partida no turno 99. Nos duelos que chegaram
+// ||             la com as duas vivas (08 e 09/10), em 32 de 34 ficou em 1o quem
+// ||             respondeu MAIS DEVAGAR na ultima jogada. Sem a espera, no fim
+// ||             a busca ve o limite e responde em ~25 ms: perdiamos quase todos,
+// ||             mesmo sendo maiores. A jogada em si nao muda, so a hora de enviar.
+// ============================================================================
+
+/// Ate quanto tempo (contado da chegada da requisicao) segurar a resposta,
+/// ou `None` para responder assim que decidir.
+fn final_hold(state: &GameState, cold: bool) -> Option<Duration> {
+    if state.turn < ARENA_LAST_TURN - FINAL_HOLD_TURNS || state.turn > ARENA_LAST_TURN {
+        return None;
+    }
+    // >>> Processo novo: a Lambda ja gastou um tempo para iniciar que nao
+    // >>> enxergamos daqui. Esperar mais seria arriscar o timeout.
+    if cold || previous_latency_was_slow(state) {
+        return None;
+    }
+    let timeout = state.game.timeout as u64;
+    Some(Duration::from_millis(timeout.saturating_sub(RESPONSE_MARGIN_MS)))
 }
 
 #[cfg(test)]
@@ -287,6 +330,35 @@ mod tests {
         for _ in 0..50 {
             assert_ne!(chosen_move(&state), "up");
         }
+    }
+
+    #[test]
+    fn segura_a_resposta_so_nos_ultimos_turnos() {
+        let mut state = game_state(Coord { x: 5, y: 4 }, Coord { x: 4, y: 4 });
+        for (turn, expected) in [(4, None), (96, None), (97, Some(350)), (98, Some(350)), (99, Some(350)), (100, None)] {
+            state.turn = turn;
+            let hold = final_hold(&state, false).map(|d| d.as_millis() as u64);
+            assert_eq!(hold, expected, "turno {turn}");
+        }
+
+        state.turn = 98;
+        assert_eq!(final_hold(&state, true), None, "primeira jogada do processo não espera");
+        state.you.latency = Some("450".to_string());
+        assert_eq!(final_hold(&state, false), None, "jogada anterior lenta não espera");
+    }
+
+    #[test]
+    fn no_fim_da_partida_a_resposta_sai_perto_de_350_ms() {
+        let mut state = game_state(Coord { x: 5, y: 4 }, Coord { x: 4, y: 4 });
+        state.turn = 98;
+        // >>> A primeira jogada do processo não espera; esta chamada "aquece".
+        let _ = get_move(&state);
+
+        let started = Instant::now();
+        let response = get_move(&state);
+        let elapsed = started.elapsed().as_millis();
+        assert!((340..450).contains(&elapsed), "respondeu em {elapsed} ms");
+        assert!(response["shout"].as_str().unwrap_or("").contains("espera"));
     }
 
     #[test]
